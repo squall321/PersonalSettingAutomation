@@ -465,9 +465,11 @@ Environment=USER=${REAL_USER}
 Environment=SHELL=/bin/bash
 Environment=XDG_RUNTIME_DIR=/run/user/${REAL_UID}
 ExecStartPre=-/usr/bin/vncserver -kill :${TIGER_DISP}
-# /tmp/.X11-unix 는 root 소유 시스템 디렉토리 — User=일반유저는 chmod 불가
-# 잔여 lock/socket 만 정리하고 mkdir/chmod 는 건드리지 않음
-ExecStartPre=-/bin/rm -f /tmp/.X${TIGER_DISP}-lock /tmp/.X11-unix/X${TIGER_DISP}
+# '+' 접두사 = User= 무시하고 root 로 실행. /tmp 의 sticky bit 때문에
+# 일반유저는 자기가 만들지 않은 lock/socket 을 지울 수 없음 (이전 실패
+# 시도의 흔적이 남아있으면 'Cannot establish any listening sockets' 에러).
+# 또한 좀비 Xvnc 가 :${TIGER_DISP} 잡고 있을 수도 있어 같이 정리.
+ExecStartPre=+/bin/bash -c 'pkill -9 -f "Xvnc.*:${TIGER_DISP}( |$)" 2>/dev/null; rm -f /tmp/.X${TIGER_DISP}-lock /tmp/.X11-unix/X${TIGER_DISP} 2>/dev/null; true'
 ExecStart=/usr/bin/vncserver -fg :${TIGER_DISP} -geometry 1920x1080 -depth 24 -localhost no
 ExecStop=/usr/bin/vncserver -kill :${TIGER_DISP}
 Restart=on-failure
