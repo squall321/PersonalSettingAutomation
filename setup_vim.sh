@@ -33,10 +33,61 @@ REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
 
 info "대상 사용자: $REAL_USER ($REAL_HOME)"
 
-# ── 프록시 환경변수 로드 (setup_proxy.sh 적용 환경 대응) ──────
-if [[ -f /etc/environment ]]; then
+# ── 프록시 설정 로드 (proxy_config.yaml 우선, /etc/environment 폴백) ──
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+YAML_CONFIG="${SCRIPT_DIR}/proxy_config.yaml"
+
+load_proxy_from_yaml() {
+  local yaml="$1"
+  python3 - "$yaml" << 'PYEOF'
+import sys, re
+
+def yaml_get(path, key_path):
+    data = {}
+    section = None
+    with open(path) as f:
+        for line in f:
+            line = line.rstrip()
+            if not line or line.lstrip().startswith('#'):
+                continue
+            m = re.match(r'^(\w[\w-]*):\s*(.*)', line)
+            if m:
+                section = m.group(1)
+                val = m.group(2).strip().strip('"\'')
+                data[section] = val if val and not val.startswith('#') else {}
+                continue
+            m = re.match(r'^\s{2,}([\w-]+):\s*(.*)', line)
+            if m and isinstance(data.get(section), dict):
+                v = m.group(2).strip().strip('"\'').split('#')[0].strip()
+                data[section][m.group(1)] = v
+    keys = key_path.split('.')
+    val = data
+    for k in keys:
+        val = val.get(k, '') if isinstance(val, dict) else ''
+    return val or ''
+
+path = sys.argv[1]
+http  = yaml_get(path, 'proxy.http')
+https = yaml_get(path, 'proxy.https')
+nop   = yaml_get(path, 'proxy.no_proxy')
+if http or https:
+    print(f"HTTP_PROXY={http}")
+    print(f"HTTPS_PROXY={https}")
+    print(f"NO_PROXY={nop}")
+PYEOF
+}
+
+if [[ -f "$YAML_CONFIG" ]] && command -v python3 &>/dev/null; then
+  info "proxy_config.yaml 에서 프록시 설정 읽는 중: $YAML_CONFIG"
+  while IFS='=' read -r key val; do
+    [[ -z "$key" ]] && continue
+    export "$key"="$val"
+    export "${key,,}"="$val"
+    info "  $key=$val"
+  done < <(load_proxy_from_yaml "$YAML_CONFIG")
+elif [[ -f /etc/environment ]]; then
+  info "/etc/environment 에서 프록시 설정 읽는 중"
   set +u
-  # /etc/environment 에서 proxy 관련 변수만 추출해 export
   while IFS='=' read -r key val; do
     key=$(echo "$key" | tr -d ' "')
     val=$(echo "$val" | tr -d '"')
@@ -47,6 +98,8 @@ if [[ -f /etc/environment ]]; then
   done < /etc/environment
   set -u
   [[ -n "${HTTP_PROXY:-}" ]] && info "프록시 감지: $HTTP_PROXY"
+else
+  info "프록시 설정 없음 (proxy_config.yaml / /etc/environment 미존재)"
 fi
 
 # ════════════════════════════════════════════════════════════
