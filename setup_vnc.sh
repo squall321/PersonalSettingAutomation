@@ -183,24 +183,44 @@ section "[2] 필수 패키지 설치"
 
 apt-get $APT_PROXY_OPTS update -y
 
-apt-get $APT_PROXY_OPTS install -y xauth dbus-x11 2>/dev/null || true
-success "기본 패키지 완료"
+# ── 공통 기반 패키지 ──────────────────────────────────────
+# xauth          : X 인증 쿠키 관리
+# dbus-x11       : D-Bus X11 세션 연동 (XFCE 필수)
+# x11-xserver-utils : xsetroot, xrandr 등 X 유틸
+# xserver-common : Xvnc 공통 파일 (폰트 경로 등)
+# xfonts-base    : Xvnc -fp 옵션 폰트 (없으면 X Error 발생)
+# xterm          : 최후 폴백 터미널
+apt-get $APT_PROXY_OPTS install -y \
+  xauth \
+  dbus-x11 \
+  x11-xserver-utils \
+  xserver-common \
+  xfonts-base \
+  xterm \
+  && success "공통 기반 패키지 설치 완료" || warn "일부 공통 패키지 설치 실패"
 
+# ── x11vnc (GNOME 세션 미러링) ────────────────────────────
 if [[ "$INSTALL_X11VNC" == "true" ]]; then
-  apt-get $APT_PROXY_OPTS install -y x11vnc \
+  apt-get $APT_PROXY_OPTS install -y \
+    x11vnc \
     && success "x11vnc 설치 완료" || warn "x11vnc 설치 실패"
 fi
 
+# ── TigerVNC + XFCE (헤드리스 독립 서버) ─────────────────
+# tigervnc-standalone-server : Xvnc 바이너리 포함
+# tigervnc-common            : vncpasswd 등 공통 도구
+# xfce4, xfce4-goodies       : 데스크톱 환경 (GNOME보다 가상 디스플레이에서 안정적)
 if [[ "$INSTALL_TIGER" == "true" ]]; then
   apt-get $APT_PROXY_OPTS install -y \
-    tigervnc-standalone-server tigervnc-common \
+    tigervnc-standalone-server \
+    tigervnc-common \
     && success "TigerVNC 설치 완료" || warn "TigerVNC 설치 실패"
-  # GNOME 대신 XFCE: 가상 디스플레이에서 훨씬 안정적
-  if ! dpkg -l xfce4 2>/dev/null | grep -q "^ii"; then
-    info "XFCE 설치 중 (TigerVNC 가상 디스플레이용)..."
-    apt-get $APT_PROXY_OPTS install -y xfce4 xfce4-goodies dbus-x11 \
-      && success "XFCE 설치 완료" || warn "XFCE 설치 실패 — xterm 폴백 사용"
-  fi
+
+  apt-get $APT_PROXY_OPTS install -y \
+    xfce4 \
+    xfce4-goodies \
+    xfce4-terminal \
+    && success "XFCE 설치 완료" || warn "XFCE 설치 실패 — xterm 폴백 사용"
 fi
 
 # ════════════════════════════════════════════════════════════
