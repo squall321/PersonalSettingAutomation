@@ -498,7 +498,7 @@ fi
 # ════════════════════════════════════════════════════════════
 section "동작 확인"
 
-sleep 3
+sleep 10
 if [[ "$INSTALL_X11VNC" == "true" ]]; then
   if ss -tlnp 2>/dev/null | grep -q ":${X11VNC_PORT}"; then
     success "x11vnc 포트 ${X11VNC_PORT} LISTEN ✓"
