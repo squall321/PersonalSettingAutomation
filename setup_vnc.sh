@@ -402,13 +402,15 @@ WorkingDirectory=${REAL_HOME}
 # PIDFile: vncserver 가 생성하는 실제 경로 (hostname:display.pid)
 PIDFile=${PID_FILE}
 
-# ── 시작 전 정리 [1]: root 권한으로 /tmp 잠금 파일 + 소켓 디렉토리 복구 ──
-# User= 권한(일반유저)으로는 root 소유 /tmp/.X?-lock 삭제 불가
-# /tmp/.X11-unix 권한 불량 시 "_XSERVTransSocketUNIXCreateListener failed" 발생
+# ── 시작 전 정리 [1]: root 권한 — lock + 소켓 완전 초기화 ──────
+# User=(일반유저)로는 root 소유 lock 삭제 불가 → ExecStartPre는 root 실행
 ExecStartPre=/bin/bash -c '\
   rm -f /tmp/.X${VNC_DISPLAY}-lock; \
   rm -f /tmp/.X11-unix/X${VNC_DISPLAY}; \
-  [ ! -d /tmp/.X11-unix ] && mkdir -m 1777 /tmp/.X11-unix || chmod 1777 /tmp/.X11-unix'
+  [ -e /tmp/.X11-unix ] && [ ! -d /tmp/.X11-unix ] && rm -f /tmp/.X11-unix; \
+  mkdir -p /tmp/.X11-unix; \
+  chmod 1777 /tmp/.X11-unix; \
+  chown root:root /tmp/.X11-unix'
 
 # ── 시작 전 정리 [2]: 사용자 권한으로 기존 vncserver 종료 ──────
 ExecStartPre=/bin/su - ${REAL_USER} -c '\
@@ -443,39 +445,77 @@ success "서비스 파일 작성 완료: $SERVICE_FILE"
 
 systemctl daemon-reload
 
-# ── STEP A: 기존 서비스/프로세스 완전 종료 ───────────────────
-info "기존 VNC 프로세스 정리 중..."
+# ── STEP A: 기존 VNC/X 프로세스 완전 종료 (root 권한) ─────────
+info "[A] 기존 VNC/X 프로세스 완전 종료 중..."
+
+# systemd 서비스 중지
 systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
-# 서비스 stop 후 프로세스가 남아있으면 강제 kill
-if pgrep -u "$REAL_USER" -f "Xtigervnc.*:${VNC_DISPLAY}" &>/dev/null; then
-  pkill -u "$REAL_USER" -f "Xtigervnc.*:${VNC_DISPLAY}" 2>/dev/null || true
-  sleep 1
-fi
-if pgrep -u "$REAL_USER" -f "vncserver.*:${VNC_DISPLAY}" &>/dev/null; then
-  pkill -u "$REAL_USER" -f "vncserver.*:${VNC_DISPLAY}" 2>/dev/null || true
-  sleep 1
-fi
+sleep 1
 
-# ── STEP B: root 권한으로 stale lock 파일 + 소켓 완전 복구 ──
-# /tmp/.X?-lock 은 root 소유인 경우 있어 반드시 root가 삭제
-# /tmp/.X11-unix/ 권한이 틀리면 "_XSERVTransSocketUNIXCreateListener failed" 발생
-info "stale X 잠금 파일 + 소켓 디렉토리 복구 중 (root)..."
-rm -f /tmp/.X${VNC_DISPLAY}-lock 2>/dev/null || true
-rm -f /tmp/.X11-unix/X${VNC_DISPLAY} 2>/dev/null || true
-rm -f "${VNC_PASSWD_DIR}"/*:${VNC_DISPLAY}.pid 2>/dev/null || true
+# vncserver 스크립트로 정상 종료 시도
+sudo -u "$REAL_USER" /usr/bin/vncserver -kill :${VNC_DISPLAY} 2>/dev/null || true
+sleep 1
 
-# /tmp/.X11-unix 디렉토리 권한 복구 (1777 sticky — 없거나 권한 틀리면 X 소켓 생성 불가)
-if [[ ! -d /tmp/.X11-unix ]]; then
-  mkdir -m 1777 /tmp/.X11-unix
-  info "/tmp/.X11-unix 디렉토리 생성 (1777)"
-else
-  XSOCK_PERM=$(stat -c "%a" /tmp/.X11-unix 2>/dev/null || echo "")
-  if [[ "$XSOCK_PERM" != "1777" ]]; then
-    warn "/tmp/.X11-unix 권한 이상 ($XSOCK_PERM) → 1777 로 수정"
-    chmod 1777 /tmp/.X11-unix
+# 남은 Xtigervnc 프로세스 강제 kill (SIGTERM → SIGKILL)
+for sig in TERM KILL; do
+  if pgrep -f "Xtigervnc.*:${VNC_DISPLAY}\b" &>/dev/null; then
+    kill -${sig} $(pgrep -f "Xtigervnc.*:${VNC_DISPLAY}\b") 2>/dev/null || true
+    sleep 1
   fi
+done
+
+# 해당 display 번호를 사용하는 모든 X 프로세스 kill
+for sig in TERM KILL; do
+  if pgrep -f "X.*:${VNC_DISPLAY}\b" &>/dev/null; then
+    kill -${sig} $(pgrep -f "X.*:${VNC_DISPLAY}\b") 2>/dev/null || true
+    sleep 1
+  fi
+done
+
+success "[A] 프로세스 종료 완료"
+
+# ── STEP B: /tmp X 소켓 완전 초기화 (root 권한) ───────────────
+# _XSERVTransSocketUNIXCreateListener failed 원인:
+#   1) /tmp/.X?-lock 잔존 (root 소유 → 일반 유저 삭제 불가)
+#   2) /tmp/.X11-unix/X? 소켓 파일 잔존
+#   3) /tmp/.X11-unix 디렉토리 권한 불량 (1777 이어야 함)
+#   4) /tmp/.X11-unix 자체가 소켓/파일로 오염
+info "[B] /tmp X 소켓 환경 완전 초기화 중 (root)..."
+
+# lock 파일 삭제
+rm -f /tmp/.X${VNC_DISPLAY}-lock
+info "  /tmp/.X${VNC_DISPLAY}-lock 삭제"
+
+# 소켓 파일 삭제
+rm -f /tmp/.X11-unix/X${VNC_DISPLAY}
+info "  /tmp/.X11-unix/X${VNC_DISPLAY} 삭제"
+
+# /tmp/.X11-unix 디렉토리 완전 재생성
+# (chmod만으론 복구 안 되는 경우 대비 — 다른 소켓은 유지하면서 재생성)
+if [[ -e /tmp/.X11-unix && ! -d /tmp/.X11-unix ]]; then
+  # 파일/심볼릭링크로 오염된 경우 강제 삭제
+  warn "  /tmp/.X11-unix 가 디렉토리가 아님 → 강제 삭제 후 재생성"
+  rm -f /tmp/.X11-unix
 fi
-success "stale 잠금 파일 + 소켓 디렉토리 복구 완료"
+if [[ ! -d /tmp/.X11-unix ]]; then
+  mkdir -p /tmp/.X11-unix
+  info "  /tmp/.X11-unix 디렉토리 생성"
+fi
+# 권한 강제 설정 (sticky bit 포함 1777)
+chmod 1777 /tmp/.X11-unix
+chown root:root /tmp/.X11-unix
+info "  /tmp/.X11-unix 권한: $(stat -c '%a %U:%G' /tmp/.X11-unix)"
+
+# PID 파일 삭제
+rm -f "${VNC_PASSWD_DIR}"/*:${VNC_DISPLAY}.pid 2>/dev/null || true
+rm -f "${VNC_PASSWD_DIR}"/*::${VNC_DISPLAY}.pid 2>/dev/null || true
+info "  PID 파일 삭제 완료"
+
+# 최종 상태 확인
+info "[B] /tmp 소켓 환경 상태:"
+ls -la /tmp/.X${VNC_DISPLAY}-lock 2>/dev/null && warn "  경고: lock 파일 여전히 존재!" || info "  lock 파일 없음 ✓"
+ls -la /tmp/.X11-unix/ 2>/dev/null | sed 's/^/    /'
+success "[B] /tmp X 소켓 환경 초기화 완료"
 
 # ── STEP C: 일반 사용자로 직접 vncserver 시작 테스트 ────────
 # systemd 서비스 전에 직접 실행해 xstartup/GNOME 오류를 빠르게 감지
