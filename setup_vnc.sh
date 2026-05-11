@@ -160,20 +160,17 @@ if [[ -f "$GDM_CONF" ]]; then
     fi
   fi
   success "GDM Wayland 비활성화 완료 ($GDM_CONF)"
-
-  # 설정 즉시 적용: GDM 재시작 (현재 GUI 세션 종료 후 X11로 재시작됨)
-  info "GDM 재시작 중 (Wayland→X11 전환 적용)..."
-  if systemctl is-active gdm3 &>/dev/null; then
-    systemctl restart gdm3 &
-    GDM_RESTART_PID=$!
-    sleep 5   # GDM 재시작 완료 대기 (백그라운드 실행이므로 짧게)
-    success "GDM 재시작 완료 → 이제 X11 세션으로 실행됩니다"
-  elif systemctl is-active gdm &>/dev/null; then
-    systemctl restart gdm &
-    sleep 5
-    success "GDM(gdm) 재시작 완료"
+  # ※ GDM restart는 하지 않음 — 현재 GUI 세션을 강제 종료시키기 때문
+  #   설정은 다음 로그인(또는 재부팅) 시 자동 적용됨
+  # 현재 세션 타입 확인
+  CURRENT_SESSION_TYPE=$(loginctl show-session \
+    "$(loginctl | awk -v u="$REAL_USER" '$0 ~ u {print $1; exit}')" \
+    -p Type --value 2>/dev/null || echo "unknown")
+  if [[ "$CURRENT_SESSION_TYPE" == "wayland" ]]; then
+    warn "현재 세션: Wayland → 로그아웃 후 재로그인하면 X11로 전환됩니다"
+    warn "  (로그인 화면 우하단 ⚙️ 클릭 → 'Ubuntu on Xorg' 선택)"
   else
-    warn "GDM 서비스 미실행 — 다음 부팅 시 X11로 적용됩니다"
+    success "현재 세션: ${CURRENT_SESSION_TYPE} (X11) — 즉시 적용 가능"
   fi
 else
   warn "GDM 설정 파일 없음 — LightDM 등 사용 중이면 X11이 이미 기본값"
