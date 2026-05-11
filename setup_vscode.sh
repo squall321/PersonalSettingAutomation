@@ -27,9 +27,20 @@ apt-get install -y wget gpg apt-transport-https ca-certificates
 # Microsoft GPG 키 등록
 echo "[2/4] Microsoft GPG 키 등록 중..."
 mkdir -p /etc/apt/keyrings
-wget -qO- https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor > /tmp/microsoft.gpg
-install -o root -g root -m 644 /tmp/microsoft.gpg /etc/apt/keyrings/microsoft.gpg
-rm /tmp/microsoft.gpg
+
+# 키를 파일로 먼저 내려받은 뒤 변환 (파이프 전달 시 손상 방지)
+wget -q https://packages.microsoft.com/keys/microsoft.asc -O /tmp/microsoft.asc
+# ASCII armor(.asc) → binary(.gpg) 변환
+gpg --batch --yes --dearmor -o /etc/apt/keyrings/microsoft.gpg /tmp/microsoft.asc
+chmod 644 /etc/apt/keyrings/microsoft.gpg
+rm /tmp/microsoft.asc
+
+# 키 정상 여부 확인
+if ! gpg --no-default-keyring --keyring /etc/apt/keyrings/microsoft.gpg \
+        --list-keys &>/dev/null; then
+  echo "[ERROR] GPG 키 변환 실패 — 네트워크 또는 gpg 버전을 확인하세요."
+  exit 1
+fi
 
 # Microsoft 레포지토리 등록
 echo "[3/4] Microsoft APT 레포지토리 등록 중..."
