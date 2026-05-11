@@ -437,20 +437,20 @@ CFGEOF
 
   # 시스템 서비스로 등록 (user systemd/machinectl 없이도 동작)
   TIGER_SERVICE="tigervnc-${REAL_USER}"
+  HOSTNAME_VAL=$(hostname)
   cat > "/etc/systemd/system/${TIGER_SERVICE}.service" << TSVC
 [Unit]
 Description=TigerVNC Server for ${REAL_USER} (XFCE headless :${TIGER_DISP})
 After=network.target syslog.target
 
 [Service]
-Type=forking
+Type=simple
 User=${REAL_USER}
 Group=${REAL_USER}
 WorkingDirectory=${REAL_HOME}
 Environment=HOME=${REAL_HOME}
 Environment=USER=${REAL_USER}
 Environment=SHELL=/bin/bash
-PIDFile=${REAL_HOME}/.vnc/%H:${TIGER_DISP}.pid
 ExecStartPre=/bin/sh -c 'rm -f /tmp/.X${TIGER_DISP}-lock /tmp/.X11-unix/X${TIGER_DISP} 2>/dev/null; true'
 ExecStart=/usr/bin/vncserver :${TIGER_DISP} -rfbport ${TIGER_PORT} -rfbauth ${PASSWD_FILE} -localhost no -fg
 ExecStop=/usr/bin/vncserver -kill :${TIGER_DISP}
