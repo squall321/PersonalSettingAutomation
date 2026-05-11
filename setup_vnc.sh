@@ -1,29 +1,26 @@
 #!/bin/bash
 # ============================================================
-#  setup_vnc.sh  v1
-#  Ubuntu VNC 원격 접속 자동화 스크립트
+#  setup_vnc.sh  v2  —  Ubuntu GNOME VNC 완전 자동화
 #  Target: Ubuntu 20.04 / 22.04 / 24.04 LTS
 #
-#  구성:
-#   1. 프록시 설정 로드 (proxy_config.yaml)
-#   2. 필수 패키지 설치 (TigerVNC + 데스크탑 환경)
-#   3. VNC 비밀번호 설정
-#   4. xstartup 구성 (DE 자동 감지: GNOME/KDE/XFCE/MATE)
-#   5. systemd 서비스 등록 (부팅 시 자동 시작)
-#   6. x11vnc (현재 세션 미러링 모드) 선택 지원
-#   7. UFW 방화벽 포트 오픈 (5900+display)
-#   8. SSH 터널링 안내
+#  핵심 설계 원칙:
+#   - GNOME + TigerVNC 에 특화된 신뢰성 있는 설정
+#   - Wayland 충돌 완전 차단 (XDG_SESSION_TYPE=x11 강제)
+#   - GPU 없는 VNC 환경에서도 gnome-shell 정상 동작 (소프트웨어 렌더링)
+#   - stale lock / PID 파일 자동 정리
+#   - gnome-initial-setup 차단 (VNC 세션 블로킹 방지)
+#   - systemd 서비스: 전용 서비스 (템플릿 User=%i 버그 없음)
+#   - 부팅 후 자동 시작
 #
 #  사용법:
 #    sudo bash setup_vnc.sh [옵션]
-#    옵션:
-#      --display N     VNC 디스플레이 번호 (기본: 1, 포트 5901)
-#      --port P        VNC 포트 직접 지정 (기본: 5900+display)
-#      --geometry WxH  해상도 (기본: 1920x1080)
-#      --depth D       색 깊이 (기본: 24)
-#      --password PWD  VNC 비밀번호 (미지정 시 대화형 입력)
-#      --x11vnc        TigerVNC 대신 x11vnc (현재 세션 미러링) 사용
-#      --no-firewall   UFW 방화벽 설정 건너뜀
+#
+#  옵션:
+#    --display N     VNC 디스플레이 번호 (기본: 1 → 포트 5901)
+#    --geometry WxH  해상도 (기본: 1920x1080)
+#    --depth D       색 깊이 (기본: 24)
+#    --password PWD  VNC 비밀번호 비대화형 지정
+#    --no-firewall   UFW 설정 건너뜀
 # ============================================================
 
 set -uo pipefail
@@ -34,42 +31,54 @@ CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
-error()   { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
+error()   { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 section() { echo -e "\n${BOLD}━━━  $*  ━━━${NC}"; }
 
 # ── 권한 확인 ─────────────────────────────────────────────────
 [[ $EUID -eq 0 ]] || error "sudo 로 실행하세요:  sudo bash $0 $*"
 
 REAL_USER="${SUDO_USER:-$USER}"
+[[ "$REAL_USER" == "root" ]] && error "SUDO_USER 가 없습니다. 'sudo bash $0' 형태로 실행하세요."
+
 REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
-info "대상 사용자: $REAL_USER ($REAL_HOME)"
+REAL_GROUP=$(id -gn "$REAL_USER" 2>/dev/null || echo "$REAL_USER")
+[[ -z "$REAL_HOME" ]] && error "사용자 '$REAL_USER' 의 홈 디렉토리를 찾을 수 없습니다."
+
+info "대상 사용자 : $REAL_USER"
+info "홈 디렉토리 : $REAL_HOME"
 
 # ── 인수 파싱 ─────────────────────────────────────────────────
 VNC_DISPLAY=1
-VNC_PORT=""
 VNC_GEOMETRY="1920x1080"
 VNC_DEPTH=24
 VNC_PASSWORD=""
-USE_X11VNC=false
 SKIP_FIREWALL=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --display)   VNC_DISPLAY="$2";  shift 2 ;;
-    --port)      VNC_PORT="$2";     shift 2 ;;
-    --geometry)  VNC_GEOMETRY="$2"; shift 2 ;;
-    --depth)     VNC_DEPTH="$2";    shift 2 ;;
-    --password)  VNC_PASSWORD="$2"; shift 2 ;;
-    --x11vnc)    USE_X11VNC=true;   shift ;;
+    --display)    VNC_DISPLAY="$2";  shift 2 ;;
+    --geometry)   VNC_GEOMETRY="$2"; shift 2 ;;
+    --depth)      VNC_DEPTH="$2";    shift 2 ;;
+    --password)   VNC_PASSWORD="$2"; shift 2 ;;
     --no-firewall) SKIP_FIREWALL=true; shift ;;
-    *) warn "알 수 없는 옵션: $1"; shift ;;
+    *) warn "알 수 없는 옵션 무시: $1"; shift ;;
   esac
 done
 
-[[ -z "$VNC_PORT" ]] && VNC_PORT=$((5900 + VNC_DISPLAY))
+VNC_PORT=$((5900 + VNC_DISPLAY))
+SERVER_HOSTNAME=$(hostname)
+VNC_PASSWD_DIR="$REAL_HOME/.vnc"
+SERVICE_NAME="vncserver-gnome-${REAL_USER}@${VNC_DISPLAY}"
+
 info "VNC 디스플레이 : :${VNC_DISPLAY}  (포트 ${VNC_PORT})"
 info "해상도         : ${VNC_GEOMETRY}"
 info "색 깊이        : ${VNC_DEPTH}bit"
+info "서비스 이름    : ${SERVICE_NAME}"
+
+# ── Ubuntu 버전 감지 ──────────────────────────────────────────
+UBUNTU_VER=$(lsb_release -rs 2>/dev/null || echo "22.04")
+UBUNTU_MAJOR=${UBUNTU_VER%%.*}
+info "Ubuntu 버전    : ${UBUNTU_VER}"
 
 # ════════════════════════════════════════════════════════════
 # 프록시 설정 로드
@@ -103,14 +112,18 @@ def yaml_get(path, key_path):
         val = val.get(k, '') if isinstance(val, dict) else ''
     return val or ''
 path = sys.argv[1]
-http = yaml_get(path, 'proxy.http'); https = yaml_get(path, 'proxy.https'); nop = yaml_get(path, 'proxy.no_proxy')
+http  = yaml_get(path, 'proxy.http')
+https = yaml_get(path, 'proxy.https')
+nop   = yaml_get(path, 'proxy.no_proxy')
 if http or https:
-    print(f"HTTP_PROXY={http}"); print(f"HTTPS_PROXY={https}"); print(f"NO_PROXY={nop}")
+    print(f"HTTP_PROXY={http}")
+    print(f"HTTPS_PROXY={https}")
+    print(f"NO_PROXY={nop}")
 PYEOF
 }
 
 if [[ -f "$YAML_CONFIG" ]] && command -v python3 &>/dev/null; then
-  info "proxy_config.yaml 에서 프록시 읽는 중"
+  info "proxy_config.yaml 에서 프록시 로드 중"
   while IFS='=' read -r key val; do
     [[ -z "$key" ]] && continue
     export "$key"="$val"
@@ -118,7 +131,7 @@ if [[ -f "$YAML_CONFIG" ]] && command -v python3 &>/dev/null; then
     info "  $key=$val"
   done < <(load_proxy_from_yaml "$YAML_CONFIG")
 elif [[ -f /etc/environment ]]; then
-  info "/etc/environment 에서 프록시 읽는 중"
+  info "/etc/environment 에서 프록시 로드 중"
   while IFS='=' read -r key val; do
     key=$(echo "$key" | tr -d ' "'); val=$(echo "$val" | tr -d '"')
     case "$key" in
@@ -139,308 +152,313 @@ elif [[ -n "${HTTP_PROXY:-}" ]]; then
 fi
 
 # ════════════════════════════════════════════════════════════
-# [1] 현재 데스크탑 환경 감지
+# [1] 패키지 설치 — GNOME + TigerVNC
 # ════════════════════════════════════════════════════════════
-section "[1] 데스크탑 환경 감지"
+section "[1] 패키지 설치"
 
-detect_de() {
-  # 실행 중인 프로세스로 판별
-  for proc in gnome-session plasmashell xfce4-session mate-session cinnamon-session lxsession; do
-    if pgrep -u "$REAL_USER" "$proc" &>/dev/null; then
-      case "$proc" in
-        gnome-session)    echo "gnome"    ; return ;;
-        plasmashell)      echo "kde"      ; return ;;
-        xfce4-session)    echo "xfce"     ; return ;;
-        mate-session)     echo "mate"     ; return ;;
-        cinnamon-session) echo "cinnamon" ; return ;;
-        lxsession)        echo "lxde"     ; return ;;
-      esac
-    fi
-  done
-  # XDG 환경변수로 폴백
-  local xdg
-  xdg=$(sudo -u "$REAL_USER" printenv XDG_CURRENT_DESKTOP 2>/dev/null || echo "")
-  case "${xdg,,}" in
-    *gnome*)        echo "gnome"    ;;
-    *kde*|*plasma*) echo "kde"      ;;
-    *xfce*)         echo "xfce"     ;;
-    *mate*)         echo "mate"     ;;
-    *cinnamon*)     echo "cinnamon" ;;
-    *lxde*)         echo "lxde"     ;;
-    *)              echo "unknown"  ;;
-  esac
-}
-
-DETECTED_DE=$(detect_de)
-info "감지된 DE: ${DETECTED_DE:-알 수 없음}"
-
-# 설치된 DE 중 VNC에 가장 적합한 것 선택
-choose_de_for_vnc() {
-  # 경량 순서로 우선순위
-  for de_check in xfce mate lxde cinnamon gnome kde; do
-    case "$de_check" in
-      xfce)     command -v startxfce4    &>/dev/null && { echo "xfce";     return; } ;;
-      mate)     command -v mate-session  &>/dev/null && { echo "mate";     return; } ;;
-      lxde)     command -v startlxde     &>/dev/null && { echo "lxde";     return; } ;;
-      cinnamon) command -v cinnamon-session &>/dev/null && { echo "cinnamon"; return; } ;;
-      gnome)    command -v gnome-session &>/dev/null && { echo "gnome";    return; } ;;
-      kde)      command -v plasmashell   &>/dev/null && { echo "kde";      return; } ;;
-    esac
-  done
-  echo "none"
-}
-
-VNC_DE=$(choose_de_for_vnc)
-info "VNC용 DE: ${VNC_DE}"
-
-# ════════════════════════════════════════════════════════════
-# [2] 패키지 설치
-# ════════════════════════════════════════════════════════════
-section "[2] 패키지 설치"
-
+export DEBIAN_FRONTEND=noninteractive
 apt-get $APT_PROXY_OPTS update -y
 
-if [[ "$USE_X11VNC" == "true" ]]; then
-  # x11vnc 모드: 현재 X 세션 미러링
-  apt-get $APT_PROXY_OPTS install -y x11vnc xauth
-  success "x11vnc 설치 완료"
-else
-  # TigerVNC 모드: 독립 가상 데스크탑
-  apt-get $APT_PROXY_OPTS install -y \
-    tigervnc-standalone-server \
-    tigervnc-common \
-    dbus-x11 \
-    xauth \
-    xfonts-base
+# ── TigerVNC ───────────────────────────────────────────────
+info "TigerVNC 설치 중..."
+apt-get $APT_PROXY_OPTS install -y \
+  tigervnc-standalone-server \
+  tigervnc-common \
+  xauth \
+  xfonts-base \
+  dbus-x11
+success "TigerVNC 설치 완료"
 
-  # DE가 없으면 XFCE 설치 (경량)
-  if [[ "$VNC_DE" == "none" ]]; then
-    info "데스크탑 환경 없음 — XFCE4 설치 중..."
-    apt-get $APT_PROXY_OPTS install -y \
-      xfce4 xfce4-goodies xterm
-    VNC_DE="xfce"
-    success "XFCE4 설치 완료"
-  fi
-  success "TigerVNC 설치 완료"
+# ── GNOME 필수 패키지 ────────────────────────────────────────
+info "GNOME 필수 패키지 설치 중..."
+apt-get $APT_PROXY_OPTS install -y \
+  gnome-session \
+  gnome-shell \
+  gnome-shell-extensions \
+  gnome-settings-daemon \
+  gnome-control-center \
+  gnome-terminal \
+  gnome-tweaks \
+  nautilus \
+  adwaita-icon-theme-full \
+  fonts-cantarell \
+  fonts-noto-core \
+  at-spi2-core \
+  glib-networking \
+  gsettings-desktop-schemas
+success "GNOME 필수 패키지 설치 완료"
+
+# ── 소프트웨어 렌더링 (VNC = GPU 없음, gnome-shell 크래시 방지) ──
+info "소프트웨어 렌더링 라이브러리 설치 중..."
+apt-get $APT_PROXY_OPTS install -y \
+  libgl1-mesa-dri \
+  libgl1-mesa-glx \
+  mesa-utils 2>/dev/null \
+  || apt-get $APT_PROXY_OPTS install -y libgl1-mesa-dri mesa-utils || true
+success "Mesa 소프트웨어 렌더링 설치 완료"
+
+# ── Ubuntu 테마 (설치 가능한 경우만) ────────────────────────────
+if apt-cache show yaru-theme-gnome-shell &>/dev/null 2>&1; then
+  apt-get $APT_PROXY_OPTS install -y \
+    yaru-theme-gnome-shell \
+    yaru-theme-gtk \
+    yaru-theme-icon 2>/dev/null || true
+  info "Yaru 테마 설치 완료"
 fi
 
-# 공통 유틸
+# ── 방화벽 ────────────────────────────────────────────────────
 apt-get $APT_PROXY_OPTS install -y ufw 2>/dev/null || true
+
+success "모든 패키지 설치 완료"
+
+# ── vncserver 경로 확인 ─────────────────────────────────────────
+VNCSERVER_BIN=$(command -v vncserver 2>/dev/null || echo "")
+[[ -z "$VNCSERVER_BIN" ]] && error "vncserver 바이너리를 찾을 수 없습니다. TigerVNC 설치를 확인하세요."
+info "vncserver 경로: $VNCSERVER_BIN"
+
+# ════════════════════════════════════════════════════════════
+# [2] GNOME 초기 설정 차단 (VNC 세션 블로킹 방지)
+# ════════════════════════════════════════════════════════════
+section "[2] GNOME 초기 설정 차단"
+
+# gnome-initial-setup 이 VNC 세션에서 전체 화면을 잡아 조작 불가 상태 방지
+sudo -u "$REAL_USER" bash << GNOMEINIT
+mkdir -p "\$HOME/.config"
+touch "\$HOME/.config/gnome-initial-setup-done"
+# GNOME Tour 팝업 비활성화
+if command -v gsettings &>/dev/null; then
+  GNOME_VER=\$(gnome-shell --version 2>/dev/null | awk '{print \$3}' || echo "")
+  if [[ -n "\$GNOME_VER" ]]; then
+    gsettings set org.gnome.shell welcome-dialog-last-shown-version "\$GNOME_VER" 2>/dev/null || true
+  fi
+fi
+# 자동 잠금 / 화면보호기 비활성화 (VNC 세션에서 화면 잠김 방지)
+gsettings set org.gnome.desktop.screensaver lock-enabled false 2>/dev/null || true
+gsettings set org.gnome.desktop.session idle-delay 0 2>/dev/null || true
+gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 'nothing' 2>/dev/null || true
+gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-battery-type 'nothing' 2>/dev/null || true
+GNOMEINIT
+
+success "GNOME 초기 설정 차단 완료"
 
 # ════════════════════════════════════════════════════════════
 # [3] VNC 비밀번호 설정
 # ════════════════════════════════════════════════════════════
 section "[3] VNC 비밀번호 설정"
 
-VNC_PASSWD_DIR="$REAL_HOME/.vnc"
 sudo -u "$REAL_USER" mkdir -p "$VNC_PASSWD_DIR"
 chmod 700 "$VNC_PASSWD_DIR"
+chown "$REAL_USER:$REAL_GROUP" "$VNC_PASSWD_DIR"
 
 if [[ -n "$VNC_PASSWORD" ]]; then
-  # 비대화형: 인수로 받은 비밀번호 사용
-  echo "$VNC_PASSWORD" | sudo -u "$REAL_USER" vncpasswd -f > "$VNC_PASSWD_DIR/passwd"
-  chmod 600 "$VNC_PASSWD_DIR/passwd"
-  chown "$REAL_USER:$REAL_USER" "$VNC_PASSWD_DIR/passwd"
-  success "VNC 비밀번호 설정 완료 (인수 사용)"
+  # 비대화형: --password 인수 사용
+  if echo "$VNC_PASSWORD" | sudo -u "$REAL_USER" vncpasswd -f > "$VNC_PASSWD_DIR/passwd" 2>/dev/null; then
+    chmod 600 "$VNC_PASSWD_DIR/passwd"
+    chown "$REAL_USER:$REAL_GROUP" "$VNC_PASSWD_DIR/passwd"
+    success "VNC 비밀번호 설정 완료 (인수 사용)"
+  else
+    error "vncpasswd 실패"
+  fi
 elif [[ -f "$VNC_PASSWD_DIR/passwd" ]]; then
   warn "기존 VNC 비밀번호 파일 유지: $VNC_PASSWD_DIR/passwd"
   warn "변경하려면: sudo -u $REAL_USER vncpasswd"
 else
   info "VNC 비밀번호를 입력하세요 (최소 6자):"
-  sudo -u "$REAL_USER" vncpasswd "$VNC_PASSWD_DIR/passwd" \
-    || error "VNC 비밀번호 설정 실패"
-  chmod 600 "$VNC_PASSWD_DIR/passwd"
-  success "VNC 비밀번호 설정 완료"
+  if sudo -u "$REAL_USER" vncpasswd; then
+    # vncpasswd 기본 저장 위치 확인 및 이동
+    if [[ -f "$REAL_HOME/.vnc/passwd" ]]; then
+      chmod 600 "$REAL_HOME/.vnc/passwd"
+      chown "$REAL_USER:$REAL_GROUP" "$REAL_HOME/.vnc/passwd"
+      success "VNC 비밀번호 설정 완료"
+    fi
+  else
+    error "VNC 비밀번호 설정 실패"
+  fi
 fi
 
+[[ -f "$VNC_PASSWD_DIR/passwd" ]] || error "VNC 비밀번호 파일이 없습니다: $VNC_PASSWD_DIR/passwd"
+
 # ════════════════════════════════════════════════════════════
-# [4] xstartup 스크립트 작성 (TigerVNC 전용)
+# [4] GNOME 전용 xstartup 작성
 # ════════════════════════════════════════════════════════════
-if [[ "$USE_X11VNC" != "true" ]]; then
-  section "[4] xstartup 구성 (DE: $VNC_DE)"
+section "[4] xstartup 작성 (GNOME 최적화)"
 
-  XSTARTUP="$VNC_PASSWD_DIR/xstartup"
+XSTARTUP="$VNC_PASSWD_DIR/xstartup"
 
-  # DE별 시작 명령 결정
-  case "$VNC_DE" in
-    gnome)
-      DE_CMD='exec dbus-launch --exit-with-session gnome-session'
-      DE_ENV='export GNOME_SHELL_SESSION_MODE=ubuntu\nexport XDG_CURRENT_DESKTOP=ubuntu:GNOME'
-      ;;
-    kde)
-      DE_CMD='exec dbus-launch --exit-with-session startplasma-x11'
-      DE_ENV='export XDG_CURRENT_DESKTOP=KDE\nexport KDE_FULL_SESSION=true'
-      ;;
-    xfce)
-      DE_CMD='exec dbus-launch --exit-with-session startxfce4'
-      DE_ENV='export XDG_CURRENT_DESKTOP=XFCE'
-      ;;
-    mate)
-      DE_CMD='exec dbus-launch --exit-with-session mate-session'
-      DE_ENV='export XDG_CURRENT_DESKTOP=MATE'
-      ;;
-    cinnamon)
-      DE_CMD='exec dbus-launch --exit-with-session cinnamon-session'
-      DE_ENV='export XDG_CURRENT_DESKTOP=X-Cinnamon'
-      ;;
-    lxde)
-      DE_CMD='exec dbus-launch --exit-with-session startlxde'
-      DE_ENV='export XDG_CURRENT_DESKTOP=LXDE'
-      ;;
-    *)
-      DE_CMD='exec xterm'
-      DE_ENV=''
-      warn "알 수 없는 DE — xterm 으로 폴백"
-      ;;
-  esac
+# gnome-session 에 사용할 세션 파일 감지
+#  Ubuntu: /usr/share/gnome-session/sessions/ubuntu.session (우선)
+#  순수 GNOME: gnome.session, gnome-classic.session 등
+detect_gnome_session() {
+  local session_dir="/usr/share/gnome-session/sessions"
+  for sess in ubuntu ubuntu-xorg gnome gnome-flashback-metacity gnome-classic; do
+    if [[ -f "${session_dir}/${sess}.session" ]]; then
+      echo "$sess"
+      return
+    fi
+  done
+  echo ""
+}
+GNOME_SESSION_NAME=$(detect_gnome_session)
+if [[ -n "$GNOME_SESSION_NAME" ]]; then
+  GNOME_SESSION_ARG="--session=${GNOME_SESSION_NAME}"
+  info "GNOME 세션 파일 감지: ${GNOME_SESSION_NAME}.session"
+else
+  GNOME_SESSION_ARG=""
+  warn "gnome-session 파일 미감지 — 기본값으로 시작"
+fi
 
-  cat > "$XSTARTUP" << XEOF
+# Ubuntu 버전별 XDG_DATA_DIRS 설정
+if [[ "$UBUNTU_MAJOR" -ge 20 ]]; then
+  XDG_DATA_DIRS_VAL="/usr/share/ubuntu:/usr/local/share:/usr/share:/var/lib/snapd/desktop"
+else
+  XDG_DATA_DIRS_VAL="/usr/local/share:/usr/share"
+fi
+
+cat > "$XSTARTUP" << XEOF
 #!/bin/bash
-# VNC xstartup — 자동 생성 (setup_vnc.sh)
+# ================================================================
+# VNC xstartup — GNOME 전용  (자동 생성: setup_vnc.sh v2)
+# ================================================================
 
-# 환경 초기화
+# ── 이전 세션 변수 초기화 ─────────────────────────────────────
 unset SESSION_MANAGER
 unset DBUS_SESSION_BUS_ADDRESS
 
-# X 리소스 / 키맵
-[ -r "\$HOME/.Xresources" ] && xrdb "\$HOME/.Xresources"
-xsetroot -solid grey
+# ── 핵심: X11 강제 (Wayland 완전 차단) ──────────────────────────
+# Wayland 시도 시 gnome-shell 즉시 크래시 — X11 고정 필수
+export XDG_SESSION_TYPE=x11
+export GDK_BACKEND=x11
+export QT_QPA_PLATFORM=xcb
+export CLUTTER_BACKEND=x11
 
-# 한글 입력기 (fcitx/ibus 설치 시 자동 활성화)
-if command -v fcitx5 &>/dev/null; then
-  export GTK_IM_MODULE=fcitx
-  export QT_IM_MODULE=fcitx
-  export XMODIFIERS=@im=fcitx
-  fcitx5 -d 2>/dev/null &
-elif command -v ibus-daemon &>/dev/null; then
-  export GTK_IM_MODULE=ibus
-  export QT_IM_MODULE=ibus
-  export XMODIFIERS=@im=ibus
-  ibus-daemon -drx 2>/dev/null &
-fi
+# ── GNOME Ubuntu 세션 환경 ────────────────────────────────────
+export GNOME_SHELL_SESSION_MODE=ubuntu
+export XDG_CURRENT_DESKTOP=ubuntu:GNOME
+export DESKTOP_SESSION=ubuntu
+export XDG_CONFIG_DIRS=/etc/xdg/xdg-ubuntu:/etc/xdg
+export XDG_DATA_DIRS=${XDG_DATA_DIRS_VAL}
 
-# 데스크탑 환경 시작 (${VNC_DE})
-$(echo -e "$DE_ENV")
-${DE_CMD}
+# ── 소프트웨어 렌더링 (VNC = GPU 없음) ───────────────────────
+# GPU 없이 gnome-shell 이 정상 동작하려면 llvmpipe 필수
+export LIBGL_ALWAYS_SOFTWARE=1
+export GALLIUM_DRIVER=llvmpipe
+export MESA_GL_VERSION_OVERRIDE=4.5COMPAT
+
+# ── gnome-keyring SSH 에이전트 비활성화 (VNC hang 방지) ──────
+# VNC 세션에서 gnome-keyring이 패스워드를 요구해 hang 발생 가능
+export GNOME_KEYRING_CONTROL=""
+export SSH_AUTH_SOCK=""
+
+# ── 언어/로케일 ───────────────────────────────────────────────
+export LANG=\${LANG:-ko_KR.UTF-8}
+export LANGUAGE=\${LANGUAGE:-ko_KR:ko:en_US:en}
+export LC_ALL=\${LC_ALL:-}
+
+# ── X 환경 초기화 ─────────────────────────────────────────────
+[ -r "\$HOME/.Xresources" ] && xrdb -merge "\$HOME/.Xresources" 2>/dev/null || true
+xsetroot -solid '#2E3440' 2>/dev/null || true
+
+# ── at-spi2 접근성 버스 (gnome-session 의존성) ────────────────
+/usr/libexec/at-spi-bus-launcher --launch-immediately 2>/dev/null &
+sleep 0.5
+
+# ── GNOME 세션 시작 ───────────────────────────────────────────
+# dbus-launch: VNC 세션 전용 D-Bus 데몬 생성
+# --exit-with-session: 세션 종료 시 D-Bus 데몬도 자동 종료
+exec dbus-launch --exit-with-session \
+  /usr/bin/gnome-session ${GNOME_SESSION_ARG}
 XEOF
 
-  chmod +x "$XSTARTUP"
-  chown "$REAL_USER:$REAL_USER" "$XSTARTUP"
-  success "xstartup 작성 완료: $XSTARTUP"
-fi
+chmod +x "$XSTARTUP"
+chown "$REAL_USER:$REAL_GROUP" "$XSTARTUP"
+success "xstartup 작성 완료: $XSTARTUP"
+
+# ── 기존 xstartup 백업 메시지 ────────────────────────────────
+info "내용 미리보기:"
+cat "$XSTARTUP" | sed 's/^/    /'
 
 # ════════════════════════════════════════════════════════════
-# [5] systemd 서비스 등록
+# [5] systemd 서비스 등록 (전용 서비스 — 템플릿 버그 없음)
 # ════════════════════════════════════════════════════════════
 section "[5] systemd 서비스 등록"
 
-if [[ "$USE_X11VNC" == "true" ]]; then
-  # ── x11vnc 서비스 ──────────────────────────────────────────
-  SERVICE_NAME="x11vnc"
-  cat > /etc/systemd/system/x11vnc.service << EOF
+# 전용 서비스 파일 경로
+SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+PID_FILE="${VNC_PASSWD_DIR}/${SERVER_HOSTNAME}:${VNC_DISPLAY}.pid"
+LOG_FILE="${VNC_PASSWD_DIR}/${SERVER_HOSTNAME}:${VNC_DISPLAY}.log"
+
+cat > "$SERVICE_FILE" << EOF
 [Unit]
-Description=x11vnc VNC Server (current session mirror)
-After=multi-user.target graphical.target
-Wants=graphical.target
-
-[Service]
-Type=simple
-User=${REAL_USER}
-Environment=DISPLAY=:0
-ExecStartPre=/bin/sleep 5
-ExecStart=/usr/bin/x11vnc \\
-  -display :0 \\
-  -auth guess \\
-  -forever \\
-  -loop \\
-  -noxdamage \\
-  -repeat \\
-  -rfbauth ${VNC_PASSWD_DIR}/passwd \\
-  -rfbport ${VNC_PORT} \\
-  -shared \\
-  -bg
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=graphical.target
-EOF
-  success "x11vnc.service 작성 완료 (포트 ${VNC_PORT})"
-
-else
-  # ── TigerVNC 서비스 (@템플릿 방식) ────────────────────────
-  SERVICE_NAME="vncserver@${VNC_DISPLAY}"
-
-  # tigervnc systemd 템플릿 서비스 작성
-  cat > /etc/systemd/system/vncserver@.service << 'EOF'
-[Unit]
-Description=TigerVNC Server (display :%i)
+Description=TigerVNC GNOME Server for ${REAL_USER} on display :${VNC_DISPLAY}
+Documentation=man:vncserver(1)
 After=syslog.target network.target
 
 [Service]
 Type=forking
-User=%i
-PAMName=login
-PIDFile=/home/%i/.vnc/%H:%i.pid
+User=${REAL_USER}
+Group=${REAL_GROUP}
+WorkingDirectory=${REAL_HOME}
 
-ExecStartPre=-/usr/bin/vncserver -kill :%i > /dev/null 2>&1
-ExecStart=/usr/bin/vncserver :%i \
-  -geometry GEOMETRY_PLACEHOLDER \
-  -depth DEPTH_PLACEHOLDER \
+# PIDFile: vncserver 가 생성하는 실제 경로 (hostname:display.pid)
+PIDFile=${PID_FILE}
+
+# ── 시작 전: stale lock/pid 파일 정리 ─────────────────────────
+# 이전 비정상 종료 시 잔존 파일로 인한 "already running" 오류 방지
+ExecStartPre=/bin/bash -c '\
+  /usr/bin/vncserver -kill :${VNC_DISPLAY} >/dev/null 2>&1 || true; \
+  rm -f ${VNC_PASSWD_DIR}/*:${VNC_DISPLAY}.pid; \
+  rm -f /tmp/.X${VNC_DISPLAY}-lock; \
+  rm -f /tmp/.X11-unix/X${VNC_DISPLAY}; \
+  sleep 1'
+
+ExecStart=/usr/bin/vncserver :${VNC_DISPLAY} \
+  -geometry ${VNC_GEOMETRY} \
+  -depth ${VNC_DEPTH} \
   -localhost no \
   -SecurityTypes VncAuth \
-  -rfbauth /home/%i/.vnc/passwd
-ExecStop=/usr/bin/vncserver -kill :%i
+  -rfbauth ${VNC_PASSWD_DIR}/passwd \
+  -log "*:stderr:30"
 
+ExecStop=/bin/bash -c '/usr/bin/vncserver -kill :${VNC_DISPLAY} >/dev/null 2>&1 || true'
+
+# ── 비정상 종료 시 자동 재시작 (10초 후) ──────────────────────
 Restart=on-failure
-RestartSec=5
+RestartSec=10
+TimeoutStartSec=60
+TimeoutStopSec=20
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-  # geometry/depth 치환
-  sed -i \
-    -e "s/GEOMETRY_PLACEHOLDER/${VNC_GEOMETRY}/" \
-    -e "s/DEPTH_PLACEHOLDER/${VNC_DEPTH}/" \
-    /etc/systemd/system/vncserver@.service
+success "서비스 파일 작성 완료: $SERVICE_FILE"
 
-  # 사용자 전용 서비스 (User= 가 %i 템플릿이라 실제 사용자로 override)
-  OVERRIDE_DIR="/etc/systemd/system/vncserver@${VNC_DISPLAY}.service.d"
-  mkdir -p "$OVERRIDE_DIR"
-  cat > "$OVERRIDE_DIR/override.conf" << EOF
-[Service]
-User=${REAL_USER}
-PIDFile=${REAL_HOME}/.vnc/%H:${VNC_DISPLAY}.pid
-ExecStartPre=-/usr/bin/vncserver -kill :${VNC_DISPLAY} > /dev/null 2>&1
-ExecStart=
-ExecStart=/usr/bin/vncserver :${VNC_DISPLAY} \\
-  -geometry ${VNC_GEOMETRY} \\
-  -depth ${VNC_DEPTH} \\
-  -localhost no \\
-  -SecurityTypes VncAuth \\
-  -rfbauth ${VNC_PASSWD_DIR}/passwd
-ExecStop=
-ExecStop=/usr/bin/vncserver -kill :${VNC_DISPLAY}
-EOF
-  success "vncserver@.service + override 작성 완료"
-fi
-
-# 서비스 활성화 및 시작
+# ── 기존 서비스 정리 후 등록 ─────────────────────────────────
 systemctl daemon-reload
-systemctl enable "${SERVICE_NAME}" 2>/dev/null \
+
+# 혹시 기존에 실행 중이면 중지
+systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
+
+# 기존 stale 프로세스 강제 정리
+sudo -u "$REAL_USER" bash -c "
+  vncserver -kill :${VNC_DISPLAY} >/dev/null 2>&1 || true
+  rm -f ${VNC_PASSWD_DIR}/*:${VNC_DISPLAY}.pid
+  rm -f /tmp/.X${VNC_DISPLAY}-lock
+  rm -f /tmp/.X11-unix/X${VNC_DISPLAY}
+" 2>/dev/null || true
+sleep 1
+
+systemctl enable "${SERVICE_NAME}" \
   && success "${SERVICE_NAME} 자동시작 등록 완료" \
   || warn "${SERVICE_NAME} enable 실패"
 
-# 기존 VNC 프로세스 정리 후 시작
-if [[ "$USE_X11VNC" != "true" ]]; then
-  sudo -u "$REAL_USER" vncserver -kill ":${VNC_DISPLAY}" &>/dev/null || true
-  sleep 1
-fi
-
-systemctl restart "${SERVICE_NAME}" 2>/dev/null \
+systemctl start "${SERVICE_NAME}" \
   && success "${SERVICE_NAME} 시작 완료" \
-  || warn "${SERVICE_NAME} 시작 실패 (재부팅 후 자동 시작됩니다)"
+  || {
+    warn "${SERVICE_NAME} 시작 실패 — 로그 확인:"
+    journalctl -u "${SERVICE_NAME}" --no-pager -n 20 2>/dev/null || true
+    warn "재부팅 후 자동 시작됩니다."
+  }
 
 # ════════════════════════════════════════════════════════════
 # [6] UFW 방화벽 설정
@@ -450,75 +468,114 @@ section "[6] UFW 방화벽 설정"
 if [[ "$SKIP_FIREWALL" == "true" ]]; then
   warn "방화벽 설정 건너뜀 (--no-firewall)"
 elif command -v ufw &>/dev/null; then
-  ufw allow "${VNC_PORT}/tcp" comment "VNC :${VNC_DISPLAY}" 2>/dev/null \
-    && success "UFW: 포트 ${VNC_PORT}/tcp 오픈" \
-    || warn "UFW 규칙 추가 실패 (ufw 비활성 상태일 수 있음)"
-
-  # SSH도 열려있는지 확인 (SSH 터널용)
-  if ! ufw status | grep -q "22/tcp\|OpenSSH"; then
+  # SSH 포트 (SSH 터널용 — 먼저 확보)
+  if ! ufw status 2>/dev/null | grep -qE "22/tcp|OpenSSH"; then
     ufw allow 22/tcp comment "SSH" 2>/dev/null && success "UFW: SSH(22/tcp) 오픈" || true
+  else
+    info "UFW: SSH(22/tcp) 이미 허용됨"
   fi
 
-  # UFW 활성화 (이미 활성이면 무시)
+  # VNC 포트
+  ufw allow "${VNC_PORT}/tcp" comment "VNC-GNOME :${VNC_DISPLAY}" 2>/dev/null \
+    && success "UFW: 포트 ${VNC_PORT}/tcp 오픈" \
+    || warn "UFW 규칙 추가 실패"
+
+  # UFW 활성화
   ufw --force enable 2>/dev/null && success "UFW 활성화 완료" || true
+  ufw status numbered 2>/dev/null | head -20 || true
 else
-  warn "ufw 미설치 — 방화벽 설정 건너뜀"
-  warn "수동: sudo iptables -A INPUT -p tcp --dport ${VNC_PORT} -j ACCEPT"
+  warn "ufw 미설치 — iptables 수동 설정 필요:"
+  warn "  sudo iptables -A INPUT -p tcp --dport ${VNC_PORT} -j ACCEPT"
 fi
 
 # ════════════════════════════════════════════════════════════
-# [7] VNC 동작 확인
+# [7] 동작 확인 및 진단
 # ════════════════════════════════════════════════════════════
-section "[7] VNC 동작 확인"
+section "[7] 동작 확인"
 
-sleep 2
+sleep 3
+
+# 서비스 상태
+SVC_STATUS=$(systemctl is-active "${SERVICE_NAME}" 2>/dev/null || echo "unknown")
+if [[ "$SVC_STATUS" == "active" ]]; then
+  success "서비스 상태: active (실행 중)"
+else
+  warn "서비스 상태: ${SVC_STATUS}"
+  info "로그 확인: sudo journalctl -u ${SERVICE_NAME} -n 30"
+fi
+
+# 포트 LISTEN 확인
 if ss -tlnp 2>/dev/null | grep -q ":${VNC_PORT}"; then
   success "포트 ${VNC_PORT} LISTEN 확인 ✓"
 elif netstat -tlnp 2>/dev/null | grep -q ":${VNC_PORT}"; then
   success "포트 ${VNC_PORT} LISTEN 확인 ✓"
 else
-  warn "포트 ${VNC_PORT} 아직 LISTEN 안 됨 (서비스 시작 시간 필요 또는 재부팅)"
-  info "확인: sudo ss -tlnp | grep ${VNC_PORT}"
+  warn "포트 ${VNC_PORT} 아직 LISTEN 안 됨 (gnome-session 초기화 시간 필요)"
+  info "30초 후 재확인: ss -tlnp | grep ${VNC_PORT}"
 fi
 
-# 서버 IP 수집
-SERVER_IPS=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^$' | head -5 || echo "IP 확인 불가")
+# PID 파일 확인
+if [[ -f "$PID_FILE" ]]; then
+  VNC_PID=$(cat "$PID_FILE" 2>/dev/null || echo "")
+  success "PID 파일 확인: $PID_FILE (PID: $VNC_PID)"
+else
+  warn "PID 파일 아직 없음: $PID_FILE"
+fi
+
+# VNC 로그 파일 확인
+if [[ -f "$LOG_FILE" ]]; then
+  info "VNC 로그 (마지막 5줄):"
+  tail -5 "$LOG_FILE" 2>/dev/null | sed 's/^/    /' || true
+fi
+
+# 서버 IP 목록
+SERVER_IPS=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^$' | grep -v '^127\.' | head -5 || echo "")
 
 # ════════════════════════════════════════════════════════════
 # 완료 안내
 # ════════════════════════════════════════════════════════════
 echo ""
-echo -e "${GREEN}══════════════════════════════════════════════════════${NC}"
-echo -e "${GREEN}  ✅  VNC 설정 완료!                                  ${NC}"
-echo -e "${GREEN}══════════════════════════════════════════════════════${NC}"
+echo -e "${GREEN}╔══════════════════════════════════════════════════════╗${NC}"
+echo -e "${GREEN}║  ✅  GNOME VNC 설정 완료!                           ║${NC}"
+echo -e "${GREEN}╚══════════════════════════════════════════════════════╝${NC}"
 echo ""
 echo -e "${BOLD}  서버 정보:${NC}"
-echo "    사용자  : $REAL_USER"
-echo "    DE      : ${VNC_DE}"
-echo "    해상도  : ${VNC_GEOMETRY} @ ${VNC_DEPTH}bit"
-echo "    포트    : ${VNC_PORT}  (디스플레이 :${VNC_DISPLAY})"
+echo "    사용자    : $REAL_USER"
+echo "    DE        : GNOME (세션: ${GNOME_SESSION_NAME:-기본값})"
+echo "    해상도    : ${VNC_GEOMETRY} @ ${VNC_DEPTH}bit"
+echo "    렌더링    : 소프트웨어 (llvmpipe) — GPU 없이도 동작"
+echo "    포트      : ${VNC_PORT}  (디스플레이 :${VNC_DISPLAY})"
 echo ""
-echo -e "${BOLD}  접속 주소 (VNC 클라이언트):${NC}"
-while read -r ip; do
-  [[ -z "$ip" ]] && continue
-  echo "    ${ip}:${VNC_PORT}   또는   ${ip}::${VNC_DISPLAY}"
-done <<< "$SERVER_IPS"
+if [[ -n "$SERVER_IPS" ]]; then
+  echo -e "${BOLD}  VNC 클라이언트 접속 주소:${NC}"
+  while read -r ip; do
+    [[ -z "$ip" ]] && continue
+    echo "    ${ip}:${VNC_PORT}"
+  done <<< "$SERVER_IPS"
+  echo ""
+fi
+echo -e "${BOLD}  보안 접속 — SSH 터널 (강력 권장):${NC}"
+echo "    ① 로컬 PC 터미널에서:"
+echo "       ssh -L 5901:localhost:${VNC_PORT} ${REAL_USER}@<서버IP>"
+echo "    ② VNC 클라이언트에서: localhost:5901 접속"
 echo ""
 echo -e "${BOLD}  추천 VNC 클라이언트:${NC}"
-echo "    Windows : RealVNC Viewer, TightVNC Viewer, TigerVNC Viewer"
-echo "    macOS   : RealVNC Viewer, 화면 공유 (내장)"
-echo "    Linux   : Remmina, TigerVNC Viewer"
-echo ""
-echo -e "${BOLD}  보안 접속 (SSH 터널 — 권장):${NC}"
-echo "    1. SSH 터널 설정 (로컬 PC에서 실행):"
-echo "       ssh -L 5901:localhost:${VNC_PORT} ${REAL_USER}@<서버IP>"
-echo "    2. VNC 클라이언트에서 localhost:5901 으로 접속"
+echo "    Windows  : RealVNC Viewer (https://www.realvnc.com/download/viewer/)"
+echo "    macOS    : RealVNC Viewer / Finder > 이동 > 서버에 연결 > vnc://IP:PORT"
+echo "    Linux    : Remmina,  vncviewer <IP>::${VNC_DISPLAY}"
 echo ""
 echo -e "${BOLD}  서비스 관리:${NC}"
-echo "    상태 확인 : sudo systemctl status ${SERVICE_NAME}"
-echo "    재시작    : sudo systemctl restart ${SERVICE_NAME}"
-echo "    중지      : sudo systemctl stop ${SERVICE_NAME}"
-echo "    비밀번호 변경: sudo -u ${REAL_USER} vncpasswd ${VNC_PASSWD_DIR}/passwd"
+echo "    상태 확인   : sudo systemctl status ${SERVICE_NAME}"
+echo "    재시작      : sudo systemctl restart ${SERVICE_NAME}"
+echo "    중지        : sudo systemctl stop ${SERVICE_NAME}"
+echo "    로그 보기   : sudo journalctl -u ${SERVICE_NAME} -f"
+echo "    비밀번호 변경: sudo -u ${REAL_USER} vncpasswd"
 echo ""
-warn "VNC는 기본적으로 암호화되지 않습니다. 외부 접속 시 SSH 터널 사용을 강력 권장합니다."
+echo -e "${BOLD}  문제 진단:${NC}"
+echo "    VNC 로그    : cat ${LOG_FILE}"
+echo "    포트 확인   : ss -tlnp | grep ${VNC_PORT}"
+echo "    수동 테스트 : sudo -u ${REAL_USER} vncserver :${VNC_DISPLAY} -geometry ${VNC_GEOMETRY} -localhost no -SecurityTypes VncAuth -rfbauth ${VNC_PASSWD_DIR}/passwd"
+echo ""
+echo -e "${YELLOW}  ⚠  VNC는 기본적으로 암호화되지 않습니다.${NC}"
+echo -e "${YELLOW}     외부망 접속 시 반드시 SSH 터널을 사용하세요.${NC}"
 echo ""
