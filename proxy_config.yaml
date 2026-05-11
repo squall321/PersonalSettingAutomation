@@ -1,0 +1,69 @@
+# ============================================================
+#  proxy_config.yaml
+#  프록시 자동화 설정 파일
+#  - crt_path : 이 yaml 파일 기준 상대경로
+#  - proxy     : http/https 프록시 주소
+#  - no_proxy  : 프록시 제외 대상 (콤마 구분)
+#  - targets   : 적용할 저장소/도구 (true/false)
+# ============================================================
+
+proxy:
+  http:  "http://proxy.example.com:8080"
+  https: "http://proxy.example.com:8080"
+  no_proxy: "localhost,127.0.0.1,::1,.local"
+
+certificate:
+  crt_path: "./certs/my-ca.crt"   # yaml 파일 기준 상대경로
+
+targets:
+  # ── 시스템 ──────────────────────────────────────────────
+  system:     true    # /etc/environment  (전역 환경변수)
+  apt:        true    # /etc/apt/apt.conf.d/99-proxy
+  snap:       true    # snap set system proxy.*
+  gnome:      true    # gsettings org.gnome.system.proxy
+
+  # ── CLI 다운로드 도구 ────────────────────────────────────
+  wget:       true    # ~/.wgetrc
+  curl:       true    # ~/.curlrc
+
+  # ── 버전 관리 ────────────────────────────────────────────
+  git:        true    # ~/.gitconfig
+
+  # ── 컨테이너 / 오케스트레이션 ────────────────────────────
+  docker:     true    # /etc/systemd/system/docker.service.d/
+  podman:     true    # /etc/containers/containers.conf
+  helm:       true    # ~/.config/helm/helm_proxy (env)
+  kubectl:    true    # ~/.kube/config proxy-url 필드
+
+  # ── Python ───────────────────────────────────────────────
+  pip:        true    # ~/.config/pip/pip.conf
+  conda:      true    # ~/.condarc
+  poetry:     true    # poetry config + /etc/environment
+
+  # ── Node.js ──────────────────────────────────────────────
+  npm:        true    # ~/.npmrc
+  yarn:       true    # ~/.yarnrc.yml  (yarn berry / classic)
+  pnpm:       true    # ~/.npmrc  (pnpm 공유)
+
+  # ── JVM 계열 ─────────────────────────────────────────────
+  maven:      true    # ~/.m2/settings.xml
+  gradle:     true    # ~/.gradle/gradle.properties
+  jvm:        true    # JAVA_TOOL_OPTIONS → /etc/environment
+
+  # ── Rust ─────────────────────────────────────────────────
+  cargo:      true    # ~/.cargo/config.toml
+
+  # ── Go ───────────────────────────────────────────────────
+  go:         true    # go env -w
+
+  # ── Ruby ─────────────────────────────────────────────────
+  gem:        true    # ~/.gemrc
+  bundler:    true    # bundle config
+
+  # ── HashiCorp / IaC ──────────────────────────────────────
+  terraform:  true    # ~/.terraformrc
+  ansible:    true    # ~/.ansible.cfg (http_proxy env)
+
+  # ── 기타 패키지 매니저 ────────────────────────────────────
+  pipx:       true    # /etc/environment 경유 (환경변수 상속)
+  flatpak:    true    # flatpak --system config
