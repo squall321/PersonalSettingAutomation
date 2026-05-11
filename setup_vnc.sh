@@ -410,12 +410,15 @@ if [[ "$INSTALL_TIGER" == "true" ]] && command -v vncserver &>/dev/null; then
   info "xstartup 제거 — /etc/X11/Xtigervnc-session (시스템 기본 세션) 사용"
 
   # ── ~/.vnc/config (vncserver 옵션) ──────────────────────
-  HOSTNAME_NOW=$(hostname)
+  # session=xfce      : Xtigervnc-session이 XFCE로 시작 (GNOME 빠짐 방지)
+  # SecurityTypes     : Ubuntu 22.04+ TLS 기본 회피, VncAuth 폴백 강제
   cat > "$VNC_DIR/config" << CFGEOF
+session=xfce
 geometry=1920x1080
 depth=24
 localhost=no
 rfbport=${TIGER_PORT}
+SecurityTypes=VncAuth
 CFGEOF
   chown "$REAL_USER:$REAL_USER" "$VNC_DIR/config"
 
@@ -428,21 +431,20 @@ CFGEOF
   TIGER_SERVICE="tigervnc-${REAL_USER}"
 
   # ── 시스템 서비스 ────────────────────────────────────────
-  # 이 PC의 실제 실행 방식 그대로:
-  #   vncserver -fg :1 -geometry 1920x1080 -depth 24 -localhost no
-  # Type=forking: vncserver(perl)가 Xtigervnc fork 후 종료 → PID 추적
-  # PIDFile: vncserver가 생성하는 실제 경로 (hostname:disp.pid)
+  # -fg 는 vncserver(perl)가 fork 하지 않고 Xvnc로 exec → foreground 모드
+  # 따라서 systemd Type 은 반드시 'simple' (forking 으로 두면 fork 신호를
+  # 기다리다 timeout → 서비스가 영원히 activating 상태에서 실패함).
+  # 같은 이유로 PIDFile 불필요 — systemd가 main PID 직접 추적.
   cat > "/etc/systemd/system/${TIGER_SERVICE}.service" << TSVC
 [Unit]
 Description=TigerVNC Server for ${REAL_USER} (:${TIGER_DISP}, port ${TIGER_PORT})
-After=network.target
+After=network.target syslog.target
 
 [Service]
-Type=forking
+Type=simple
 User=${REAL_USER}
 Group=${REAL_USER}
 WorkingDirectory=${REAL_HOME}
-PIDFile=${REAL_HOME}/.vnc/${HOSTNAME_NOW}:${TIGER_DISP}.pid
 Environment=HOME=${REAL_HOME}
 Environment=USER=${REAL_USER}
 Environment=SHELL=/bin/bash
