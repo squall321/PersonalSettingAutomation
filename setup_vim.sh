@@ -33,6 +33,22 @@ REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
 
 info "대상 사용자: $REAL_USER ($REAL_HOME)"
 
+# ── 프록시 환경변수 로드 (setup_proxy.sh 적용 환경 대응) ──────
+if [[ -f /etc/environment ]]; then
+  set +u
+  # /etc/environment 에서 proxy 관련 변수만 추출해 export
+  while IFS='=' read -r key val; do
+    key=$(echo "$key" | tr -d ' "')
+    val=$(echo "$val" | tr -d '"')
+    case "$key" in
+      http_proxy|HTTP_PROXY|https_proxy|HTTPS_PROXY|no_proxy|NO_PROXY)
+        export "$key"="$val" ;;
+    esac
+  done < /etc/environment
+  set -u
+  [[ -n "${HTTP_PROXY:-}" ]] && info "프록시 감지: $HTTP_PROXY"
+fi
+
 # ════════════════════════════════════════════════════════════
 # [1] vim 설치 (클립보드 지원 포함)
 # ════════════════════════════════════════════════════════════
@@ -74,10 +90,30 @@ PLUG_PATH="$REAL_HOME/.vim/autoload/plug.vim"
 sudo -u "$REAL_USER" mkdir -p "$(dirname "$PLUG_PATH")"
 
 if [[ ! -f "$PLUG_PATH" ]]; then
-  sudo -u "$REAL_USER" curl -fLo "$PLUG_PATH" --create-dirs \
-    https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.vim \
-    && success "vim-plug 설치 완료" \
-    || error "vim-plug 다운로드 실패 — 인터넷 연결을 확인하세요"
+  info "vim-plug 다운로드 중..."
+  # curl 시 프록시 전달
+  PROXY_ARGS=""
+  [[ -n "${HTTPS_PROXY:-}" ]] && PROXY_ARGS="--proxy ${HTTPS_PROXY}"
+  [[ -n "${HTTP_PROXY:-}"  ]] && PROXY_ARGS="--proxy ${HTTP_PROXY}"
+
+  if sudo -u "$REAL_USER" curl -fLo "$PLUG_PATH" --create-dirs \
+       ${PROXY_ARGS} --connect-timeout 30 --retry 3 \
+       https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.vim 2>/dev/null; then
+    success "vim-plug 설치 완료 (curl)"
+  else
+    warn "curl 실패 — git clone 으로 대체 시도"
+    TMP_PLUG=$(mktemp -d)
+    if sudo -u "$REAL_USER" HOME="$REAL_HOME" \
+         git clone --depth=1 https://github.com/junegunn/vim-plug.git "$TMP_PLUG" 2>/dev/null; then
+      cp "$TMP_PLUG/plug.vim" "$PLUG_PATH"
+      chown "$REAL_USER:$REAL_USER" "$PLUG_PATH"
+      rm -rf "$TMP_PLUG"
+      success "vim-plug 설치 완료 (git clone)"
+    else
+      rm -rf "$TMP_PLUG"
+      error "vim-plug 다운로드 실패 — 네트워크/프록시 설정을 확인하세요"
+    fi
+  fi
 else
   success "vim-plug 이미 설치됨"
 fi
@@ -396,12 +432,78 @@ success ".vimrc 작성 완료"
 # ════════════════════════════════════════════════════════════
 # [5] 플러그인 자동 설치
 # ════════════════════════════════════════════════════════════
-section "[5] vim-plug 플러그인 설치"
+section "[5] vim-plug 플러그인 설치 (git clone 직접 방식)"
 
+PLUG_DIR="$REAL_HOME/.vim/plugged"
+sudo -u "$REAL_USER" mkdir -p "$PLUG_DIR"
+
+# git clone 헬퍼 (프록시 환경 자동 상속)
+clone_plugin() {
+  local repo="$1" dir="$2"
+  local dest="$PLUG_DIR/$dir"
+  if [[ -d "$dest/.git" ]]; then
+    sudo -u "$REAL_USER" HOME="$REAL_HOME" \
+      git -C "$dest" pull --ff-only --quiet 2>/dev/null \
+      && echo "  [업데이트] $dir" || echo "  [유지] $dir (pull 실패)"
+  else
+    rm -rf "$dest"
+    if sudo -u "$REAL_USER" HOME="$REAL_HOME" \
+         git clone --depth=1 "https://github.com/${repo}.git" "$dest" --quiet 2>/dev/null; then
+      echo "  [설치] $dir"
+    else
+      warn "clone 실패: $repo (네트워크/프록시 확인)"
+    fi
+  fi
+}
+
+clone_plugin "preservim/nerdtree"                 "nerdtree"
+clone_plugin "Xuyuanp/nerdtree-git-plugin"        "nerdtree-git-plugin"
+clone_plugin "ryanoasis/vim-devicons"             "vim-devicons"
+clone_plugin "junegunn/fzf"                       "fzf"
+clone_plugin "junegunn/fzf.vim"                   "fzf.vim"
+clone_plugin "vim-airline/vim-airline"            "vim-airline"
+clone_plugin "vim-airline/vim-airline-themes"     "vim-airline-themes"
+clone_plugin "morhetz/gruvbox"                    "gruvbox"
+clone_plugin "joshdick/onedark.vim"               "onedark.vim"
+clone_plugin "sheerun/vim-polyglot"               "vim-polyglot"
+clone_plugin "tpope/vim-fugitive"                 "vim-fugitive"
+clone_plugin "airblade/vim-gitgutter"             "vim-gitgutter"
+clone_plugin "jiangmiao/auto-pairs"               "auto-pairs"
+clone_plugin "mg979/vim-visual-multi"             "vim-visual-multi"
+clone_plugin "tpope/vim-commentary"               "vim-commentary"
+clone_plugin "tpope/vim-surround"                 "vim-surround"
+clone_plugin "Yggdroot/indentLine"                "indentLine"
+clone_plugin "ntpeters/vim-better-whitespace"     "vim-better-whitespace"
+clone_plugin "voldikss/vim-floaterm"              "vim-floaterm"
+clone_plugin "tpope/vim-obsession"                "vim-obsession"
+
+# coc.nvim — release 브랜치
+if command -v node &>/dev/null; then
+  COC_DIR="$PLUG_DIR/coc.nvim"
+  if [[ -d "$COC_DIR/.git" ]]; then
+    sudo -u "$REAL_USER" HOME="$REAL_HOME" \
+      git -C "$COC_DIR" pull --ff-only --quiet 2>/dev/null && echo "  [업데이트] coc.nvim" || true
+  else
+    rm -rf "$COC_DIR"
+    sudo -u "$REAL_USER" HOME="$REAL_HOME" \
+      git clone --depth=1 -b release https://github.com/neoclide/coc.nvim.git "$COC_DIR" --quiet 2>/dev/null \
+      && echo "  [설치] coc.nvim" || warn "coc.nvim clone 실패"
+  fi
+fi
+
+# fzf 바이너리 설치 (go 빌드 대신 pre-built 바이너리)
+FZF_INSTALL="$PLUG_DIR/fzf/install"
+if [[ -f "$FZF_INSTALL" ]]; then
+  sudo -u "$REAL_USER" HOME="$REAL_HOME" \
+    bash "$FZF_INSTALL" --bin 2>/dev/null \
+    && echo "  [설치] fzf 바이너리" || warn "fzf 바이너리 설치 실패 (수동: ~/.vim/plugged/fzf/install --bin)"
+fi
+
+# vim-plug 상태 파일 생성 (vim이 이미 설치된 것으로 인식하게)
 sudo -u "$REAL_USER" HOME="$REAL_HOME" \
-  vim -E -s -u "$VIMRC" +PlugInstall +qall 2>/dev/null \
-  && success "플러그인 설치 완료" \
-  || { warn "PlugInstall 중 일부 오류 발생 (vim 실행 후 :PlugInstall 재시도)"; true; }
+  vim -u "$VIMRC" -c 'PlugStatus' -c 'sleep 1' -c 'qa!' 2>/dev/null || true
+
+success "플러그인 설치 완료"
 
 # ════════════════════════════════════════════════════════════
 # [6] coc-settings.json 작성
