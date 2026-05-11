@@ -402,157 +402,71 @@ if [[ "$INSTALL_TIGER" == "true" ]] && command -v vncserver &>/dev/null; then
   TIGER_DISP="${TIGER_PORT##590}"
   [[ -z "$TIGER_DISP" || "$TIGER_DISP" -le 0 ]] && TIGER_DISP=1
 
-  # xstartup — VNC 접속 후 즉시 끊기는 원인:
-  #   1) dbus 없이 XFCE 실행 → 세션 오류로 즉시 종료
-  #   2) exec 없이 실행 → xstartup 반환 시 VNC 세션 종료
-  #   3) XDG_RUNTIME_DIR 없음 → XFCE 내부 오류
-  cat > "$VNC_DIR/xstartup" << 'STARTEOF'
-#!/bin/sh
-unset SESSION_MANAGER
-unset DBUS_SESSION_BUS_ADDRESS
+  # ── xstartup 삭제 ─────────────────────────────────────────
+  # xstartup 이 없으면 TigerVNC가 /etc/X11/Xtigervnc-session 을 사용
+  # → /etc/X11/Xsession → GNOME/기본 데스크톱 세션 자동 시작
+  # xstartup 이 있으면 그게 우선 적용돼서 오히려 문제 발생
+  rm -f "$VNC_DIR/xstartup"
+  info "xstartup 제거 — /etc/X11/Xtigervnc-session (시스템 기본 세션) 사용"
 
-# XDG_RUNTIME_DIR 보장
-uid=$(id -u)
-export XDG_RUNTIME_DIR="/run/user/${uid}"
-mkdir -p "$XDG_RUNTIME_DIR"
-chmod 0700 "$XDG_RUNTIME_DIR"
-
-# 배경색 설정 (오류 무시)
-xsetroot -solid '#2d2d2d' 2>/dev/null || true
-
-# D-Bus 세션 시작 — XFCE가 D-Bus 없으면 즉시 종료함
-if command -v dbus-launch >/dev/null 2>&1; then
-  eval "$(dbus-launch --sh-syntax --exit-with-session)"
-fi
-
-# XFCE 시작 (exec: xstartup이 살아있어야 VNC 세션 유지)
-if command -v startxfce4 >/dev/null 2>&1; then
-  exec startxfce4
-elif command -v xfce4-session >/dev/null 2>&1; then
-  exec xfce4-session
-elif command -v lxsession >/dev/null 2>&1; then
-  exec lxsession
-else
-  # 최후 폴백: xterm 은 닫아도 VNC 유지되도록 루프
-  xterm -geometry 80x24+0+0 -ls &
-  wait
-fi
-STARTEOF
-  chmod +x "$VNC_DIR/xstartup"
-  chown "$REAL_USER:$REAL_USER" "$VNC_DIR/xstartup"
-
-  # TigerVNC 설정
+  # ── ~/.vnc/config (vncserver 옵션) ──────────────────────
+  HOSTNAME_NOW=$(hostname)
   cat > "$VNC_DIR/config" << CFGEOF
 geometry=1920x1080
 depth=24
-dpi=96
 localhost=no
 CFGEOF
   chown "$REAL_USER:$REAL_USER" "$VNC_DIR/config"
 
-  # 기존 인스턴스 정리
+  # ── 잔여 인스턴스 정리 ──────────────────────────────────
   sudo -u "$REAL_USER" vncserver -kill ":${TIGER_DISP}" 2>/dev/null || true
-  # 기존 인스턴스 완전 정리
   rm -f "/tmp/.X${TIGER_DISP}-lock" "/tmp/.X11-unix/X${TIGER_DISP}" 2>/dev/null || true
-  # /tmp/.X11-unix 권한 보장 (sticky bit + 1777)
-  mkdir -p /tmp/.X11-unix
-  chmod 1777 /tmp/.X11-unix
+  mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
   sleep 1
 
-  # Xvnc 직접 실행 래퍼 스크립트
-  # vncserver 래퍼 스크립트 대신 Xvnc를 직접 실행
-  # → _XSERVTransSocketUNIXCreateListener 오류 우회
   TIGER_SERVICE="tigervnc-${REAL_USER}"
-  TIGER_WRAPPER="/usr/local/bin/tigervnc-start-${REAL_USER}.sh"
-  TIGER_LOG="/var/log/tigervnc-${REAL_USER}.log"
 
-  cat > "$TIGER_WRAPPER" << TWRAP
-#!/bin/bash
-# TigerVNC 직접 실행 래퍼
-
-DISP="${TIGER_DISP}"
-PORT="${TIGER_PORT}"
-PASSWD="${PASSWD_FILE}"
-XSTARTUP="${VNC_DIR}/xstartup"
-LOG="${TIGER_LOG}"
-REAL_USER="${REAL_USER}"
-REAL_HOME="${REAL_HOME}"
-
-log() { echo "\$(date '+%Y-%m-%d %H:%M:%S') \$*" | tee -a "\$LOG"; }
-
-# 잔여 락 파일 정리
-rm -f "/tmp/.X\${DISP}-lock" "/tmp/.X11-unix/X\${DISP}" 2>/dev/null || true
-mkdir -p /tmp/.X11-unix
-chmod 1777 /tmp/.X11-unix
-
-log "Xvnc 시작: DISPLAY=:\${DISP} PORT=\${PORT}"
-
-# Xvnc 직접 실행 (포그라운드)
-/usr/bin/Xvnc :\${DISP} \
-  -rfbport \${PORT} \
-  -rfbauth \${PASSWD} \
-  -localhost no \
-  -geometry 1920x1080 \
-  -depth 24 \
-  -SecurityTypes VncAuth \
-  -fp /usr/share/fonts/X11/misc/,/usr/share/fonts/X11/Type1/ \
-  &
-XVNC_PID=\$!
-log "Xvnc PID=\${XVNC_PID}"
-
-# Xvnc 소켓 대기 (최대 15초)
-for i in \$(seq 1 15); do
-  sleep 1
-  if [[ -S "/tmp/.X11-unix/X\${DISP}" ]]; then
-    log "X 소켓 준비 완료 (\${i}초)"
-    break
-  fi
-done
-
-if [[ ! -S "/tmp/.X11-unix/X\${DISP}" ]]; then
-  log "오류: X 소켓 생성 실패"
-  kill \$XVNC_PID 2>/dev/null
-  exit 1
-fi
-
-# xstartup 실행 (XFCE 세션)
-log "xstartup 실행 중..."
-export DISPLAY=":\${DISP}"
-export HOME="\${REAL_HOME}"
-export USER="\${REAL_USER}"
-export XAUTHORITY="\${REAL_HOME}/.Xauthority"
-sudo -u "\${REAL_USER}" -H bash "\${XSTARTUP}" >> "\${LOG}" 2>&1 &
-XSTART_PID=\$!
-log "xstartup PID=\${XSTART_PID}"
-
-# Xvnc 종료될 때까지 대기 (서비스 메인 프로세스)
-wait \$XVNC_PID
-log "Xvnc 종료됨"
-TWRAP
-  chmod +x "$TIGER_WRAPPER"
-
+  # ── 시스템 서비스 ────────────────────────────────────────
+  # 이 PC의 실제 실행 방식 그대로:
+  #   vncserver -fg :1 -geometry 1920x1080 -depth 24 -localhost no
+  # Type=forking: vncserver(perl)가 Xtigervnc fork 후 종료 → PID 추적
+  # PIDFile: vncserver가 생성하는 실제 경로 (hostname:disp.pid)
   cat > "/etc/systemd/system/${TIGER_SERVICE}.service" << TSVC
 [Unit]
-Description=TigerVNC (Xvnc direct) for ${REAL_USER} — XFCE headless :${TIGER_DISP}
+Description=TigerVNC Server for ${REAL_USER} (:${TIGER_DISP}, port ${TIGER_PORT})
 After=network.target
 
 [Service]
-Type=simple
-User=root
-ExecStart=${TIGER_WRAPPER}
+Type=forking
+User=${REAL_USER}
+Group=${REAL_USER}
+WorkingDirectory=${REAL_HOME}
+PIDFile=${REAL_HOME}/.vnc/${HOSTNAME_NOW}:${TIGER_DISP}.pid
+Environment=HOME=${REAL_HOME}
+Environment=USER=${REAL_USER}
+Environment=SHELL=/bin/bash
+Environment=XDG_RUNTIME_DIR=/run/user/${REAL_UID}
+ExecStartPre=-/usr/bin/vncserver -kill :${TIGER_DISP}
+ExecStartPre=/bin/bash -c 'rm -f /tmp/.X${TIGER_DISP}-lock /tmp/.X11-unix/X${TIGER_DISP}; mkdir -p /tmp/.X11-unix; chmod 1777 /tmp/.X11-unix'
+ExecStart=/usr/bin/vncserver -fg :${TIGER_DISP} -rfbport ${TIGER_PORT} -rfbauth ${PASSWD_FILE} -geometry 1920x1080 -depth 24 -localhost no
+ExecStop=/usr/bin/vncserver -kill :${TIGER_DISP}
 Restart=on-failure
-RestartSec=10
-StartLimitIntervalSec=0
+RestartSec=15
 
 [Install]
 WantedBy=multi-user.target
 TSVC
 
+  # XDG_RUNTIME_DIR 사전 생성 (부팅 직후 없을 수 있음)
+  mkdir -p "/run/user/${REAL_UID}"
+  chown "${REAL_USER}:${REAL_USER}" "/run/user/${REAL_UID}"
+  chmod 700 "/run/user/${REAL_UID}"
+
   systemctl daemon-reload
   systemctl enable "${TIGER_SERVICE}"
   systemctl restart "${TIGER_SERVICE}" \
     && success "TigerVNC 서비스 시작 완료 (포트 ${TIGER_PORT})" \
-    || warn "TigerVNC 서비스 시작 실패 — 로그: journalctl -u ${TIGER_SERVICE} -f"
+    || warn "TigerVNC 시작 실패 — 로그: journalctl -u ${TIGER_SERVICE} -n 30 --no-pager"
 fi
 
 # ════════════════════════════════════════════════════════════
