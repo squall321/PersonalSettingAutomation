@@ -102,6 +102,21 @@ else
   info "프록시 설정 없음 (proxy_config.yaml / /etc/environment 미존재)"
 fi
 
+# git / curl 에 넘길 프록시 옵션 사전 구성
+GIT_PROXY_OPTS=""
+if [[ -n "${HTTPS_PROXY:-}" ]]; then
+  GIT_PROXY_OPTS="-c http.proxy=${HTTPS_PROXY}"
+elif [[ -n "${HTTP_PROXY:-}" ]]; then
+  GIT_PROXY_OPTS="-c http.proxy=${HTTP_PROXY}"
+fi
+CURL_PROXY_OPTS=""
+if [[ -n "${HTTPS_PROXY:-}" ]]; then
+  CURL_PROXY_OPTS="--proxy ${HTTPS_PROXY}"
+elif [[ -n "${HTTP_PROXY:-}" ]]; then
+  CURL_PROXY_OPTS="--proxy ${HTTP_PROXY}"
+fi
+[[ -n "$GIT_PROXY_OPTS" ]] && info "git 프록시: $GIT_PROXY_OPTS"
+
 # ════════════════════════════════════════════════════════════
 # [1] vim 설치 (클립보드 지원 포함)
 # ════════════════════════════════════════════════════════════
@@ -144,20 +159,16 @@ sudo -u "$REAL_USER" mkdir -p "$(dirname "$PLUG_PATH")"
 
 if [[ ! -f "$PLUG_PATH" ]]; then
   info "vim-plug 다운로드 중..."
-  # curl 시 프록시 전달
-  PROXY_ARGS=""
-  [[ -n "${HTTPS_PROXY:-}" ]] && PROXY_ARGS="--proxy ${HTTPS_PROXY}"
-  [[ -n "${HTTP_PROXY:-}"  ]] && PROXY_ARGS="--proxy ${HTTP_PROXY}"
-
   if sudo -u "$REAL_USER" curl -fLo "$PLUG_PATH" --create-dirs \
-       ${PROXY_ARGS} --connect-timeout 30 --retry 3 \
+       $CURL_PROXY_OPTS --connect-timeout 30 --retry 3 \
        https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.vim 2>/dev/null; then
     success "vim-plug 설치 완료 (curl)"
   else
     warn "curl 실패 — git clone 으로 대체 시도"
     TMP_PLUG=$(mktemp -d)
     if sudo -u "$REAL_USER" HOME="$REAL_HOME" \
-         git clone --depth=1 https://github.com/junegunn/vim-plug.git "$TMP_PLUG" 2>/dev/null; then
+         git $GIT_PROXY_OPTS clone --depth=1 \
+         https://github.com/junegunn/vim-plug.git "$TMP_PLUG" 2>/dev/null; then
       cp "$TMP_PLUG/plug.vim" "$PLUG_PATH"
       chown "$REAL_USER:$REAL_USER" "$PLUG_PATH"
       rm -rf "$TMP_PLUG"
@@ -490,21 +501,22 @@ section "[5] vim-plug 플러그인 설치 (git clone 직접 방식)"
 PLUG_DIR="$REAL_HOME/.vim/plugged"
 sudo -u "$REAL_USER" mkdir -p "$PLUG_DIR"
 
-# git clone 헬퍼 (프록시 환경 자동 상속)
+# git clone 헬퍼
 clone_plugin() {
   local repo="$1" dir="$2"
   local dest="$PLUG_DIR/$dir"
   if [[ -d "$dest/.git" ]]; then
     sudo -u "$REAL_USER" HOME="$REAL_HOME" \
-      git -C "$dest" pull --ff-only --quiet 2>/dev/null \
+      git $GIT_PROXY_OPTS -C "$dest" pull --ff-only --quiet 2>/dev/null \
       && echo "  [업데이트] $dir" || echo "  [유지] $dir (pull 실패)"
   else
     rm -rf "$dest"
     if sudo -u "$REAL_USER" HOME="$REAL_HOME" \
-         git clone --depth=1 "https://github.com/${repo}.git" "$dest" --quiet 2>/dev/null; then
+         git $GIT_PROXY_OPTS clone --depth=1 \
+         "https://github.com/${repo}.git" "$dest" --quiet 2>/dev/null; then
       echo "  [설치] $dir"
     else
-      warn "clone 실패: $repo (네트워크/프록시 확인)"
+      warn "clone 실패: $repo"
     fi
   fi
 }
@@ -535,11 +547,13 @@ if command -v node &>/dev/null; then
   COC_DIR="$PLUG_DIR/coc.nvim"
   if [[ -d "$COC_DIR/.git" ]]; then
     sudo -u "$REAL_USER" HOME="$REAL_HOME" \
-      git -C "$COC_DIR" pull --ff-only --quiet 2>/dev/null && echo "  [업데이트] coc.nvim" || true
+      git $GIT_PROXY_OPTS -C "$COC_DIR" pull --ff-only --quiet 2>/dev/null \
+      && echo "  [업데이트] coc.nvim" || true
   else
     rm -rf "$COC_DIR"
     sudo -u "$REAL_USER" HOME="$REAL_HOME" \
-      git clone --depth=1 -b release https://github.com/neoclide/coc.nvim.git "$COC_DIR" --quiet 2>/dev/null \
+      git $GIT_PROXY_OPTS clone --depth=1 -b release \
+      https://github.com/neoclide/coc.nvim.git "$COC_DIR" --quiet 2>/dev/null \
       && echo "  [설치] coc.nvim" || warn "coc.nvim clone 실패"
   fi
 fi
