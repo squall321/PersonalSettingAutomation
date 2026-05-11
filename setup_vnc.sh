@@ -432,30 +432,97 @@ CFGEOF
 
   # 기존 인스턴스 정리
   sudo -u "$REAL_USER" vncserver -kill ":${TIGER_DISP}" 2>/dev/null || true
+  # 기존 인스턴스 완전 정리
   rm -f "/tmp/.X${TIGER_DISP}-lock" "/tmp/.X11-unix/X${TIGER_DISP}" 2>/dev/null || true
+  # /tmp/.X11-unix 권한 보장 (sticky bit + 1777)
+  mkdir -p /tmp/.X11-unix
+  chmod 1777 /tmp/.X11-unix
   sleep 1
 
-  # 시스템 서비스로 등록 (user systemd/machinectl 없이도 동작)
+  # Xvnc 직접 실행 래퍼 스크립트
+  # vncserver 래퍼 스크립트 대신 Xvnc를 직접 실행
+  # → _XSERVTransSocketUNIXCreateListener 오류 우회
   TIGER_SERVICE="tigervnc-${REAL_USER}"
-  HOSTNAME_VAL=$(hostname)
+  TIGER_WRAPPER="/usr/local/bin/tigervnc-start-${REAL_USER}.sh"
+  TIGER_LOG="/var/log/tigervnc-${REAL_USER}.log"
+
+  cat > "$TIGER_WRAPPER" << TWRAP
+#!/bin/bash
+# TigerVNC 직접 실행 래퍼
+
+DISP="${TIGER_DISP}"
+PORT="${TIGER_PORT}"
+PASSWD="${PASSWD_FILE}"
+XSTARTUP="${VNC_DIR}/xstartup"
+LOG="${TIGER_LOG}"
+REAL_USER="${REAL_USER}"
+REAL_HOME="${REAL_HOME}"
+
+log() { echo "\$(date '+%Y-%m-%d %H:%M:%S') \$*" | tee -a "\$LOG"; }
+
+# 잔여 락 파일 정리
+rm -f "/tmp/.X\${DISP}-lock" "/tmp/.X11-unix/X\${DISP}" 2>/dev/null || true
+mkdir -p /tmp/.X11-unix
+chmod 1777 /tmp/.X11-unix
+
+log "Xvnc 시작: DISPLAY=:\${DISP} PORT=\${PORT}"
+
+# Xvnc 직접 실행 (포그라운드)
+/usr/bin/Xvnc :\${DISP} \
+  -rfbport \${PORT} \
+  -rfbauth \${PASSWD} \
+  -localhost no \
+  -geometry 1920x1080 \
+  -depth 24 \
+  -SecurityTypes VncAuth \
+  -fp /usr/share/fonts/X11/misc/,/usr/share/fonts/X11/Type1/ \
+  &
+XVNC_PID=\$!
+log "Xvnc PID=\${XVNC_PID}"
+
+# Xvnc 소켓 대기 (최대 15초)
+for i in \$(seq 1 15); do
+  sleep 1
+  if [[ -S "/tmp/.X11-unix/X\${DISP}" ]]; then
+    log "X 소켓 준비 완료 (\${i}초)"
+    break
+  fi
+done
+
+if [[ ! -S "/tmp/.X11-unix/X\${DISP}" ]]; then
+  log "오류: X 소켓 생성 실패"
+  kill \$XVNC_PID 2>/dev/null
+  exit 1
+fi
+
+# xstartup 실행 (XFCE 세션)
+log "xstartup 실행 중..."
+export DISPLAY=":\${DISP}"
+export HOME="\${REAL_HOME}"
+export USER="\${REAL_USER}"
+export XAUTHORITY="\${REAL_HOME}/.Xauthority"
+sudo -u "\${REAL_USER}" -H bash "\${XSTARTUP}" >> "\${LOG}" 2>&1 &
+XSTART_PID=\$!
+log "xstartup PID=\${XSTART_PID}"
+
+# Xvnc 종료될 때까지 대기 (서비스 메인 프로세스)
+wait \$XVNC_PID
+log "Xvnc 종료됨"
+TWRAP
+  chmod +x "$TIGER_WRAPPER"
+
   cat > "/etc/systemd/system/${TIGER_SERVICE}.service" << TSVC
 [Unit]
-Description=TigerVNC Server for ${REAL_USER} (XFCE headless :${TIGER_DISP})
-After=network.target syslog.target
+Description=TigerVNC (Xvnc direct) for ${REAL_USER} — XFCE headless :${TIGER_DISP}
+After=network.target
 
 [Service]
 Type=simple
-User=${REAL_USER}
-Group=${REAL_USER}
-WorkingDirectory=${REAL_HOME}
-Environment=HOME=${REAL_HOME}
-Environment=USER=${REAL_USER}
-Environment=SHELL=/bin/bash
-ExecStartPre=/bin/sh -c 'rm -f /tmp/.X${TIGER_DISP}-lock /tmp/.X11-unix/X${TIGER_DISP} 2>/dev/null; true'
-ExecStart=/usr/bin/vncserver :${TIGER_DISP} -rfbport ${TIGER_PORT} -rfbauth ${PASSWD_FILE} -localhost no -fg
-ExecStop=/usr/bin/vncserver -kill :${TIGER_DISP}
+User=root
+ExecStart=${TIGER_WRAPPER}
 Restart=on-failure
 RestartSec=10
+StartLimitIntervalSec=0
 
 [Install]
 WantedBy=multi-user.target
@@ -464,16 +531,8 @@ TSVC
   systemctl daemon-reload
   systemctl enable "${TIGER_SERVICE}"
   systemctl restart "${TIGER_SERVICE}" \
-    && success "TigerVNC 시스템 서비스 시작 완료 (포트 ${TIGER_PORT})" \
-    || {
-      warn "TigerVNC 서비스 시작 실패 — 직접 실행 시도"
-      sudo -u "$REAL_USER" bash -c \
-        "HOME=${REAL_HOME} USER=${REAL_USER} \
-         vncserver :${TIGER_DISP} -rfbport ${TIGER_PORT} \
-         -rfbauth ${PASSWD_FILE} -localhost no" \
-        && success "TigerVNC 직접 시작 완료" \
-        || warn "TigerVNC 시작 실패 — 로그: journalctl -u ${TIGER_SERVICE}"
-    }
+    && success "TigerVNC 서비스 시작 완료 (포트 ${TIGER_PORT})" \
+    || warn "TigerVNC 서비스 시작 실패 — 로그: journalctl -u ${TIGER_SERVICE} -f"
 fi
 
 # ════════════════════════════════════════════════════════════

@@ -100,6 +100,14 @@ sep "TigerVNC 서비스 최근 로그"
 journalctl -u "${TIGERSVC}" -n 20 --no-pager 2>/dev/null \
   || warn "로그 없음 (서비스 미등록)"
 
+sep "TigerVNC 래퍼 로그"
+TIGER_LOG="/var/log/tigervnc-${REAL_USER}.log"
+if [[ -f "$TIGER_LOG" ]]; then
+  tail -20 "$TIGER_LOG"
+else
+  warn "로그 파일 없음: ${TIGER_LOG}"
+fi
+
 sep "x11vnc 최근 로그"
 LOG_FILE="/var/log/x11vnc-${REAL_USER}.log"
 if [[ -f "$LOG_FILE" ]]; then
