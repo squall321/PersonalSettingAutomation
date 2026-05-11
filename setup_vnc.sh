@@ -58,6 +58,7 @@ TIGER_PORT=5905
 INSTALL_X11VNC=true
 INSTALL_TIGER=true
 SKIP_FIREWALL=false
+DESKTOP="gnome"   # gnome | xfce — TigerVNC 안에서 띄울 데스크톱
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -67,9 +68,14 @@ while [[ $# -gt 0 ]]; do
     --x11vnc-only) INSTALL_TIGER=false;  shift ;;
     --tiger-only)  INSTALL_X11VNC=false; shift ;;
     --no-firewall) SKIP_FIREWALL=true;   shift ;;
+    --desktop)     DESKTOP="$2";          shift 2 ;;
     *) warn "알 수 없는 옵션 무시: $1"; shift ;;
   esac
 done
+case "$DESKTOP" in
+  gnome|xfce) ;;
+  *) error "--desktop 은 gnome 또는 xfce 만 가능: $DESKTOP" ;;
+esac
 
 # 비밀번호가 없으면 대화형으로 받기
 if [[ -z "$VNC_PASS" ]]; then
@@ -271,21 +277,31 @@ if [[ "$INSTALL_X11VNC" == "true" ]]; then
     && success "x11vnc 설치 완료" || warn "x11vnc 설치 실패"
 fi
 
-# ── TigerVNC + XFCE (헤드리스 독립 서버) ─────────────────
+# ── TigerVNC + 데스크톱 (헤드리스 독립 서버) ─────────────
 # tigervnc-standalone-server : Xvnc 바이너리 포함
 # tigervnc-common            : vncpasswd 등 공통 도구
-# xfce4, xfce4-goodies       : 데스크톱 환경 (GNOME보다 가상 디스플레이에서 안정적)
+# 데스크톱은 --desktop 옵션에 따라:
+#   gnome → gnome-session (이미 데스크톱 호스트에 설치돼 있을 가능성 높음)
+#   xfce  → xfce4 (가상 디스플레이에서 가볍고 안정적)
 if [[ "$INSTALL_TIGER" == "true" ]]; then
   apt-get $APT_PROXY_OPTS install -y \
     tigervnc-standalone-server \
     tigervnc-common \
     && success "TigerVNC 설치 완료" || warn "TigerVNC 설치 실패"
 
-  apt-get $APT_PROXY_OPTS install -y \
-    xfce4 \
-    xfce4-goodies \
-    xfce4-terminal \
-    && success "XFCE 설치 완료" || warn "XFCE 설치 실패 — xterm 폴백 사용"
+  if [[ "$DESKTOP" == "gnome" ]]; then
+    apt-get $APT_PROXY_OPTS install -y \
+      gnome-session \
+      gnome-shell \
+      gnome-terminal \
+      && success "GNOME 설치 완료" || warn "GNOME 설치 실패 — 이미 설치돼 있을 수 있음"
+  else
+    apt-get $APT_PROXY_OPTS install -y \
+      xfce4 \
+      xfce4-goodies \
+      xfce4-terminal \
+      && success "XFCE 설치 완료" || warn "XFCE 설치 실패 — xterm 폴백 사용"
+  fi
 fi
 
 # ════════════════════════════════════════════════════════════
@@ -494,26 +510,59 @@ if [[ "$INSTALL_TIGER" == "true" ]] && command -v vncserver &>/dev/null; then
     info "TigerVNC 디스플레이: :${TIGER_DISP} (포트 ${TIGER_PORT})"
   fi
 
-  # ── ~/.vnc/xstartup (XFCE 명시 실행) ─────────────────────
+  # ── ~/.vnc/xstartup (데스크톱 명시 실행) ─────────────────
   # session= 옵션은 TigerVNC 1.11+ 에서만 지원 → 버전 의존성 회피 위해
   # 명시적 xstartup 사용. 시스템 기본(Xtigervnc-session→GNOME) 폴백 방지.
-  cat > "$VNC_DIR/xstartup" << 'XSEOF'
+  if [[ "$DESKTOP" == "gnome" ]]; then
+    cat > "$VNC_DIR/xstartup" << 'XSEOF'
 #!/bin/sh
+# GNOME session inside Xvnc (X11 forced — GNOME 의 Wayland 분기 회피)
+unset SESSION_MANAGER
+unset DBUS_SESSION_BUS_ADDRESS
+[ -r "$HOME/.Xresources" ] && xrdb "$HOME/.Xresources"
+export XDG_SESSION_TYPE=x11
+export XDG_CURRENT_DESKTOP=GNOME
+export XDG_SESSION_DESKTOP=gnome
+export GDK_BACKEND=x11
+# GPU 가속 없는 VNC 환경 — Mutter 가 죽지 않도록 소프트웨어 렌더링 강제
+export LIBGL_ALWAYS_SOFTWARE=1
+export MUTTER_DEBUG_DISABLE_HW_CURSOR=1
+# Ubuntu 의 X11 GNOME 세션 파일 우선순위로 시도
+for s in ubuntu-xorg ubuntu gnome-xorg gnome; do
+  [ -f "/usr/share/gnome-session/sessions/${s}.session" ] || continue
+  if command -v dbus-launch >/dev/null 2>&1; then
+    exec dbus-launch --exit-with-session gnome-session --session="$s"
+  else
+    exec gnome-session --session="$s"
+  fi
+done
+# fallback: 세션명 없이 기본 시작
+if command -v dbus-launch >/dev/null 2>&1; then
+  exec dbus-launch --exit-with-session gnome-session
+else
+  exec gnome-session
+fi
+XSEOF
+  else
+    cat > "$VNC_DIR/xstartup" << 'XSEOF'
+#!/bin/sh
+# XFCE session inside Xvnc
 unset SESSION_MANAGER
 unset DBUS_SESSION_BUS_ADDRESS
 [ -r "$HOME/.Xresources" ] && xrdb "$HOME/.Xresources"
 export XDG_SESSION_TYPE=x11
 export XDG_CURRENT_DESKTOP=XFCE
 export XDG_SESSION_DESKTOP=xfce
-# dbus-launch 로 D-Bus 세션 만든 뒤 XFCE 시작 (exec 으로 끝까지 살아있게)
 if command -v dbus-launch >/dev/null 2>&1; then
   exec dbus-launch --exit-with-session startxfce4
 else
   exec startxfce4
 fi
 XSEOF
+  fi
   chmod 755 "$VNC_DIR/xstartup"
   chown "$REAL_USER:$REAL_USER" "$VNC_DIR/xstartup"
+  info "xstartup: ${DESKTOP} 데스크톱으로 설정"
 
   # ── ~/.vnc/config (vncserver 옵션) ──────────────────────
   # session= 제거 (xstartup 사용)
