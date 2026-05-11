@@ -144,15 +144,17 @@ MARKER_BEGIN="# >>> proxy-setup-begin <<<"
 MARKER_END="# >>> proxy-setup-end <<<"
 
 write_user_block() {
-  # write_user_block <file> <content>
-  local file="$1" content="$2"
+  # write_user_block <file> <content> [tag]
+  local file="$1" content="$2" tag="${3:-default}"
+  local mb="# >>> proxy-setup-${tag}-begin <<<"
+  local me="# >>> proxy-setup-${tag}-end <<<"
   local dir
   dir="$(dirname "$file")"
   [[ -d "$dir" ]] || sudo -u "$REAL_USER" mkdir -p "$dir"
   [[ -f "$file" ]] || sudo -u "$REAL_USER" touch "$file"
 
   # 기존 블록 제거
-  python3 - "$file" "$MARKER_BEGIN" "$MARKER_END" << 'PYEOF'
+  python3 - "$file" "$mb" "$me" << 'PYEOF'
 import sys
 path, begin, end = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(path) as f:
@@ -172,18 +174,20 @@ PYEOF
   # 새 블록 추가
   {
     echo ""
-    echo "$MARKER_BEGIN"
+    echo "$mb"
     echo "$content"
-    echo "$MARKER_END"
+    echo "$me"
   } >> "$file"
   chown "$REAL_USER:$REAL_USER" "$file"
 }
 
 write_root_block() {
-  local file="$1" content="$2"
+  local file="$1" content="$2" tag="${3:-default}"
+  local mb="# >>> proxy-setup-${tag}-begin <<<"
+  local me="# >>> proxy-setup-${tag}-end <<<"
   mkdir -p "$(dirname "$file")"
   [[ -f "$file" ]] || touch "$file"
-  python3 - "$file" "$MARKER_BEGIN" "$MARKER_END" << 'PYEOF'
+  python3 - "$file" "$mb" "$me" << 'PYEOF'
 import sys
 path, begin, end = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(path) as f:
@@ -201,9 +205,9 @@ with open(path, 'w') as f:
 PYEOF
   {
     echo ""
-    echo "$MARKER_BEGIN"
+    echo "$mb"
     echo "$content"
-    echo "$MARKER_END"
+    echo "$me"
   } >> "$file"
 }
 
@@ -221,7 +225,7 @@ https_proxy=\"$HTTPS_PROXY\"
 HTTP_PROXY=\"$HTTP_PROXY\"
 HTTPS_PROXY=\"$HTTPS_PROXY\"
 no_proxy=\"$NO_PROXY\"
-NO_PROXY=\"$NO_PROXY\""
+NO_PROXY=\"$NO_PROXY\"" "system"
   success "/etc/environment 적용"
 else skip "system"; fi
 
@@ -737,7 +741,7 @@ if target_enabled "jvm"; then
 
     # /etc/environment 에 추가
     write_root_block "/etc/environment" \
-"JAVA_TOOL_OPTIONS=\"${JVM_OPTS}\""
+"JAVA_TOOL_OPTIONS=\"${JVM_OPTS}\"" "jvm"
     success "/etc/environment JAVA_TOOL_OPTIONS 적용"
   else
     warn "java 없음 — 건너뜁니다 (설치 후 재실행하면 적용됩니다)"
@@ -786,7 +790,7 @@ if target_enabled "terraform"; then
       CERT_LINE="SSL_CERT_FILE=\"$SYS_CERT_BUNDLE\""
     write_root_block "/etc/environment" \
 "# Terraform (환경변수 상속 + 인증서)
-${CERT_LINE}"
+${CERT_LINE}" "terraform"
     # provider_installation 캐시 설정
     write_user_block "$REAL_HOME/.terraformrc" \
 "# Terraform proxy (환경변수로 적용)
