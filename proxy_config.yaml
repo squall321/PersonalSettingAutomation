@@ -8,12 +8,12 @@
 # ============================================================
 
 proxy:
-  http:  "http://proxy.example.com:8080"
-  https: "http://proxy.example.com:8080"
+  http:  "http://168.219.61.252:8080"
+  https: "http://168.219.61.252:8080"
   no_proxy: "localhost,127.0.0.1,::1,.local"
 
 certificate:
-  crt_path: "./certs/my-ca.crt"   # yaml 파일 기준 상대경로
+  crt_path: "./DigitalCity.crt"   # yaml 파일 기준 상대경로
 
 targets:
   # ── 시스템 ──────────────────────────────────────────────
