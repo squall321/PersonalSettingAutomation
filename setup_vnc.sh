@@ -160,7 +160,21 @@ if [[ -f "$GDM_CONF" ]]; then
     fi
   fi
   success "GDM Wayland 비활성화 완료 ($GDM_CONF)"
-  warn "★ 현재 Wayland 세션이면 로그아웃 후 재로그인 필요 (로그인 화면 ⚙️ → 'Ubuntu on Xorg')"
+
+  # 설정 즉시 적용: GDM 재시작 (현재 GUI 세션 종료 후 X11로 재시작됨)
+  info "GDM 재시작 중 (Wayland→X11 전환 적용)..."
+  if systemctl is-active gdm3 &>/dev/null; then
+    systemctl restart gdm3 &
+    GDM_RESTART_PID=$!
+    sleep 5   # GDM 재시작 완료 대기 (백그라운드 실행이므로 짧게)
+    success "GDM 재시작 완료 → 이제 X11 세션으로 실행됩니다"
+  elif systemctl is-active gdm &>/dev/null; then
+    systemctl restart gdm &
+    sleep 5
+    success "GDM(gdm) 재시작 완료"
+  else
+    warn "GDM 서비스 미실행 — 다음 부팅 시 X11로 적용됩니다"
+  fi
 else
   warn "GDM 설정 파일 없음 — LightDM 등 사용 중이면 X11이 이미 기본값"
 fi
@@ -519,10 +533,7 @@ while read -r ip; do
     echo -e "  ${CYAN}[B] XFCE 헤드리스 (TigerVNC)${NC} →  ${ip}:${TIGER_PORT}  (항상 동작)"
 done <<< "$SERVER_IPS"
 echo ""
-echo -e "${BOLD}▶ Wayland 주의:${NC}"
-echo "  x11vnc 는 X11 전용. 현재 Wayland 세션이면:"
-echo "  로그아웃 → GDM 로그인 화면 ⚙️ → 'Ubuntu on Xorg' 선택 후 로그인"
-echo ""
+
 echo -e "${BOLD}▶ 서비스 관리:${NC}"
 [[ "$INSTALL_X11VNC" == "true" ]] && echo "  x11vnc:    sudo systemctl status/restart x11vnc-mirror"
 [[ "$INSTALL_X11VNC" == "true" ]] && echo "  x11vnc 로그: sudo tail -f /var/log/x11vnc-${REAL_USER}.log"
