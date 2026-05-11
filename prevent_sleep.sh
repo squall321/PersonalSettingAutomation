@@ -113,9 +113,9 @@ HandleHibernateKey=ignore
 IdleAction=ignore
 IdleActionSec=0
 EOF
-systemctl restart systemd-logind \
-  && success "systemd-logind 재시작 완료" \
-  || warn "재시작 실패 (재부팅 후 적용)"
+systemctl reload systemd-logind 2>/dev/null \
+  && success "systemd-logind 리로드 완료" \
+  || { warn "reload 실패 — 재부팅 후 적용됩니다 (restart는 세션 끊김 위험으로 건너뜁니다)"; true; }
 
 # ════════════════════════════════════════════════════════════
 # [2] systemd sleep targets 마스킹
@@ -124,7 +124,7 @@ section "[2] systemd sleep targets 마스킹"
 
 for t in sleep.target suspend.target hibernate.target \
           hybrid-sleep.target suspend-then-hibernate.target; do
-  systemctl mask "$t" && success "masked: $t" || warn "mask 실패: $t"
+  systemctl mask "$t" 2>/dev/null && success "masked: $t" || { warn "mask 실패: $t"; true; }
 done
 
 # ════════════════════════════════════════════════════════════
@@ -583,9 +583,9 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now prevent-sleep.service \
+systemctl enable --now prevent-sleep.service 2>/dev/null \
   && success "prevent-sleep.service 활성화 및 시작 완료" \
-  || warn "prevent-sleep.service 시작 실패"
+  || { warn "prevent-sleep.service 시작 실패 (재부팅 후 자동 시작됩니다)"; true; }
 
 # ════════════════════════════════════════════════════════════
 # 완료
