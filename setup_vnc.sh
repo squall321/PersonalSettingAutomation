@@ -440,31 +440,63 @@ EOF
 
 success "서비스 파일 작성 완료: $SERVICE_FILE"
 
-# ── 기존 서비스 정리 후 등록 ─────────────────────────────────
 systemctl daemon-reload
 
-# 혹시 기존에 실행 중이면 중지
+# ── STEP A: 기존 서비스/프로세스 완전 종료 ───────────────────
+info "기존 VNC 프로세스 정리 중..."
 systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
+# 서비스 stop 후 프로세스가 남아있으면 강제 kill
+if pgrep -u "$REAL_USER" -f "Xtigervnc.*:${VNC_DISPLAY}" &>/dev/null; then
+  pkill -u "$REAL_USER" -f "Xtigervnc.*:${VNC_DISPLAY}" 2>/dev/null || true
+  sleep 1
+fi
+if pgrep -u "$REAL_USER" -f "vncserver.*:${VNC_DISPLAY}" &>/dev/null; then
+  pkill -u "$REAL_USER" -f "vncserver.*:${VNC_DISPLAY}" 2>/dev/null || true
+  sleep 1
+fi
 
-# 기존 stale 프로세스 강제 정리 (root 권한으로 /tmp lock 파일까지 삭제)
-sudo -u "$REAL_USER" bash -c "vncserver -kill :${VNC_DISPLAY} >/dev/null 2>&1 || true" 2>/dev/null || true
-rm -f "${VNC_PASSWD_DIR}"/*:${VNC_DISPLAY}.pid
-rm -f /tmp/.X${VNC_DISPLAY}-lock
-rm -f /tmp/.X11-unix/X${VNC_DISPLAY}
-info "stale 잠금 파일 정리 완료"
-sleep 1
+# ── STEP B: root 권한으로 stale lock 파일 완전 삭제 ──────────
+# /tmp/.X?-lock 은 root 소유인 경우 있어 반드시 root가 삭제
+info "stale X 잠금 파일 정리 중 (root)..."
+rm -fv /tmp/.X${VNC_DISPLAY}-lock 2>/dev/null || true
+rm -fv /tmp/.X11-unix/X${VNC_DISPLAY} 2>/dev/null || true
+rm -fv "${VNC_PASSWD_DIR}"/*:${VNC_DISPLAY}.pid 2>/dev/null || true
+success "stale 잠금 파일 정리 완료"
 
+# ── STEP C: 일반 사용자로 직접 vncserver 시작 테스트 ────────
+# systemd 서비스 전에 직접 실행해 xstartup/GNOME 오류를 빠르게 감지
+info "일반 사용자($REAL_USER)로 vncserver :${VNC_DISPLAY} 시작 중..."
+if sudo -u "$REAL_USER" /usr/bin/vncserver :${VNC_DISPLAY} \
+    -geometry ${VNC_GEOMETRY} \
+    -depth ${VNC_DEPTH} \
+    -localhost no \
+    -SecurityTypes VncAuth \
+    -rfbauth ${VNC_PASSWD_DIR}/passwd \
+    -log "*:stderr:30" 2>/tmp/vnc_start_test.log; then
+  success "vncserver :${VNC_DISPLAY} 시작 성공"
+else
+  warn "vncserver 직접 시작 실패 — 로그:"
+  cat /tmp/vnc_start_test.log | sed 's/^/    /' || true
+  warn "서비스 방식으로 계속 진행합니다."
+fi
+
+# ── STEP D: systemd 서비스 등록 및 자동시작 활성화 ──────────
 systemctl enable "${SERVICE_NAME}" \
   && success "${SERVICE_NAME} 자동시작 등록 완료" \
   || warn "${SERVICE_NAME} enable 실패"
 
-systemctl start "${SERVICE_NAME}" \
-  && success "${SERVICE_NAME} 시작 완료" \
-  || {
-    warn "${SERVICE_NAME} 시작 실패 — 로그 확인:"
-    journalctl -u "${SERVICE_NAME}" --no-pager -n 20 2>/dev/null || true
-    warn "재부팅 후 자동 시작됩니다."
-  }
+# 이미 직접 시작했으면 서비스는 상태만 확인 (중복 시작 방지)
+SVC_ACTIVE=$(systemctl is-active "${SERVICE_NAME}" 2>/dev/null || echo "inactive")
+if [[ "$SVC_ACTIVE" != "active" ]]; then
+  systemctl start "${SERVICE_NAME}" 2>/dev/null \
+    && success "${SERVICE_NAME} systemd 서비스 시작 완료" \
+    || {
+      warn "${SERVICE_NAME} systemd 시작 실패 — 로그:"
+      journalctl -u "${SERVICE_NAME}" --no-pager -n 20 2>/dev/null || true
+    }
+else
+  success "${SERVICE_NAME} 실행 중 (직접 시작됨 — 재부팅 시 systemd 자동시작)"
+fi
 
 # ════════════════════════════════════════════════════════════
 # [6] UFW 방화벽 설정
@@ -499,25 +531,20 @@ fi
 # ════════════════════════════════════════════════════════════
 section "[7] 동작 확인"
 
-sleep 3
+# GNOME 세션은 초기화에 시간이 걸림 — 최대 15초 대기
+info "VNC 포트 대기 중 (최대 15초)..."
+for i in $(seq 1 15); do
+  if ss -tlnp 2>/dev/null | grep -q ":${VNC_PORT}"; then
+    success "포트 ${VNC_PORT} LISTEN 확인 ✓ (${i}초 후)"
+    break
+  fi
+  sleep 1
+  [[ $i -eq 15 ]] && warn "포트 ${VNC_PORT} 15초 내 LISTEN 안 됨"
+done
 
-# 서비스 상태
-SVC_STATUS=$(systemctl is-active "${SERVICE_NAME}" 2>/dev/null || echo "unknown")
-if [[ "$SVC_STATUS" == "active" ]]; then
-  success "서비스 상태: active (실행 중)"
-else
-  warn "서비스 상태: ${SVC_STATUS}"
-  info "로그 확인: sudo journalctl -u ${SERVICE_NAME} -n 30"
-fi
-
-# 포트 LISTEN 확인
+# 포트 상세 확인
 if ss -tlnp 2>/dev/null | grep -q ":${VNC_PORT}"; then
-  success "포트 ${VNC_PORT} LISTEN 확인 ✓"
-elif netstat -tlnp 2>/dev/null | grep -q ":${VNC_PORT}"; then
-  success "포트 ${VNC_PORT} LISTEN 확인 ✓"
-else
-  warn "포트 ${VNC_PORT} 아직 LISTEN 안 됨 (gnome-session 초기화 시간 필요)"
-  info "30초 후 재확인: ss -tlnp | grep ${VNC_PORT}"
+  ss -tlnp | grep ":${VNC_PORT}" | sed 's/^/    /'
 fi
 
 # PID 파일 확인
@@ -525,14 +552,18 @@ if [[ -f "$PID_FILE" ]]; then
   VNC_PID=$(cat "$PID_FILE" 2>/dev/null || echo "")
   success "PID 파일 확인: $PID_FILE (PID: $VNC_PID)"
 else
-  warn "PID 파일 아직 없음: $PID_FILE"
+  warn "PID 파일 없음: $PID_FILE"
 fi
 
 # VNC 로그 파일 확인
 if [[ -f "$LOG_FILE" ]]; then
-  info "VNC 로그 (마지막 5줄):"
-  tail -5 "$LOG_FILE" 2>/dev/null | sed 's/^/    /' || true
+  info "VNC 로그 (마지막 10줄):"
+  tail -10 "$LOG_FILE" 2>/dev/null | sed 's/^/    /' || true
 fi
+
+# 프로세스 확인
+info "VNC 프로세스:"
+ps aux | grep -E "[Xv]nc|tigervnc" | grep -v grep | sed 's/^/    /' || echo "    (없음)"
 
 # 서버 IP 목록
 SERVER_IPS=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^$' | grep -v '^127\.' | head -5 || echo "")
