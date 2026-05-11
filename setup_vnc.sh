@@ -1,23 +1,30 @@
 #!/bin/bash
 # ============================================================
-#  setup_vnc.sh  v3  —  GNOME 기존 세션 원격 접속 자동화
+#  setup_vnc.sh  v4  —  항상 동작하는 VNC 원격 접속 자동화
 #  Target: Ubuntu 20.04 / 22.04 / 24.04 LTS
 #
-#  방식 선택 (자동):
-#    Ubuntu 22.04+ : gnome-remote-desktop (GNOME 내장 RDP/VNC)
-#    모든 버전      : x11vnc (현재 켜진 GNOME 화면 :0 미러링)
+#  두 가지 모드 (기본: 둘 다 설치):
+#    [A] x11vnc   — 로그인된 GNOME 세션 미러링 (포트 5900)
+#    [B] TigerVNC — 독립 가상 디스플레이 + XFCE (포트 5901)
+#                   헤드리스/로그인 전에도 항상 접속 가능
 #
-#  ※ TigerVNC 가상 디스플레이 방식 사용 안 함
-#     → 이미 실행 중인 GNOME 세션에 그대로 붙는 방식
+#  핵심 수정 사항 (v3→v4):
+#    - Wayland 강제 비활성화 (x11vnc는 X11 전용)
+#    - x11vnc를 root 시스템 서비스로 실행 (XAUTH 문제 해결)
+#    - /proc에서 직접 DISPLAY/XAUTHORITY 추출하는 폴링 루프
+#    - TigerVNC + XFCE 헤드리스 모드 추가 (항상 동작 보장)
+#    - gnome-remote-desktop D-Bus 문제 우회 (삭제)
 #
 #  사용법:
 #    sudo bash setup_vnc.sh [옵션]
 #
 #  옵션:
-#    --port P        VNC 포트 (기본: 5900)
-#    --password PWD  VNC 비밀번호 비대화형 지정
-#    --x11vnc        gnome-remote-desktop 대신 x11vnc 강제 사용
-#    --no-firewall   UFW 설정 건너뜀
+#    --password PWD   VNC 비밀번호 비대화형 지정
+#    --x11vnc-only    x11vnc 만 설치 (TigerVNC 건너뜀)
+#    --tiger-only     TigerVNC 만 설치 (x11vnc 건너뜀)
+#    --port-x11 P     x11vnc 포트 (기본: 5900)
+#    --port-tiger P   TigerVNC 포트 (기본: 5901)
+#    --no-firewall    UFW 설정 건너뜀
 # ============================================================
 
 set -uo pipefail
@@ -43,20 +50,32 @@ info "대상 사용자: $REAL_USER (UID=$REAL_UID)"
 info "홈 디렉토리: $REAL_HOME"
 
 # ── 인수 파싱 ─────────────────────────────────────────────────
-VNC_PORT=5900
-VNC_PASSWORD=""
-FORCE_X11VNC=false
+VNC_PASS=""
+X11VNC_PORT=5900
+TIGER_PORT=5901
+INSTALL_X11VNC=true
+INSTALL_TIGER=true
 SKIP_FIREWALL=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --port)       VNC_PORT="$2";     shift 2 ;;
-    --password)   VNC_PASSWORD="$2"; shift 2 ;;
-    --x11vnc)     FORCE_X11VNC=true; shift ;;
-    --no-firewall) SKIP_FIREWALL=true; shift ;;
+    --password)    VNC_PASS="$2";        shift 2 ;;
+    --port-x11)    X11VNC_PORT="$2";     shift 2 ;;
+    --port-tiger)  TIGER_PORT="$2";      shift 2 ;;
+    --x11vnc-only) INSTALL_TIGER=false;  shift ;;
+    --tiger-only)  INSTALL_X11VNC=false; shift ;;
+    --no-firewall) SKIP_FIREWALL=true;   shift ;;
     *) warn "알 수 없는 옵션 무시: $1"; shift ;;
   esac
 done
+
+# 비밀번호가 없으면 대화형으로 받기
+if [[ -z "$VNC_PASS" ]]; then
+  echo ""
+  read -rsp "VNC 비밀번호 입력 (최소 6자): " VNC_PASS
+  echo ""
+  [[ ${#VNC_PASS} -lt 6 ]] && error "비밀번호는 6자 이상이어야 합니다."
+fi
 
 # ── Ubuntu 버전 감지 ──────────────────────────────────────────
 UBUNTU_VER=$(lsb_release -rs 2>/dev/null || echo "20.04")
@@ -112,14 +131,6 @@ if [[ -f "$YAML_CONFIG" ]] && command -v python3 &>/dev/null; then
     export "${key,,}"="$val"
     info "  $key=$val"
   done < <(load_proxy_from_yaml "$YAML_CONFIG")
-elif [[ -f /etc/environment ]]; then
-  while IFS='=' read -r key val; do
-    key=$(echo "$key" | tr -d ' "'); val=$(echo "$val" | tr -d '"')
-    case "$key" in
-      http_proxy|HTTP_PROXY|https_proxy|HTTPS_PROXY|no_proxy|NO_PROXY)
-        export "$key"="$val" ;;
-    esac
-  done < /etc/environment
 fi
 
 APT_PROXY_OPTS=""
@@ -129,228 +140,324 @@ elif [[ -n "${HTTP_PROXY:-}" ]]; then
   APT_PROXY_OPTS="-o Acquire::http::Proxy=${HTTP_PROXY}"
 fi
 
-# ════════════════════════════════════════════════════════════
-# 방식 결정: gnome-remote-desktop vs x11vnc
-# ════════════════════════════════════════════════════════════
-section "원격 접속 방식 결정"
-
-USE_GRD=false   # gnome-remote-desktop
-USE_X11VNC=false
-
-if [[ "$FORCE_X11VNC" == "true" ]]; then
-  USE_X11VNC=true
-  info "x11vnc 강제 사용 (--x11vnc 옵션)"
-elif [[ "$UBUNTU_MAJOR" -ge 22 ]] && command -v gnome-remote-desktop-daemon &>/dev/null 2>&1 \
-     || dpkg -l gnome-remote-desktop 2>/dev/null | grep -q "^ii"; then
-  USE_GRD=true
-  info "방식: gnome-remote-desktop (Ubuntu ${UBUNTU_VER} 내장)"
-else
-  USE_X11VNC=true
-  info "방식: x11vnc (기존 GNOME 세션 미러링)"
-fi
-
-# ════════════════════════════════════════════════════════════
-# 현재 X 디스플레이 감지
-# ════════════════════════════════════════════════════════════
-section "현재 X 디스플레이 감지"
-
-# 사용자의 현재 DISPLAY 찾기
-CURRENT_DISPLAY=""
-# /proc 에서 해당 유저의 DISPLAY 환경변수 탐색
-for pid in $(pgrep -u "$REAL_USER" -x gnome-shell 2>/dev/null \
-             || pgrep -u "$REAL_USER" gnome-session 2>/dev/null \
-             || pgrep -u "$REAL_USER" Xorg 2>/dev/null \
-             || echo ""); do
-  [[ -z "$pid" ]] && continue
-  disp=$(cat /proc/$pid/environ 2>/dev/null | tr '\0' '\n' | grep '^DISPLAY=' | cut -d= -f2)
-  if [[ -n "$disp" ]]; then
-    CURRENT_DISPLAY="$disp"
-    info "gnome-shell PID=$pid 에서 DISPLAY=$CURRENT_DISPLAY 감지"
-    break
-  fi
-done
-
-# 폴백: :0 시도
-if [[ -z "$CURRENT_DISPLAY" ]]; then
-  for disp_try in :0 :1 :2; do
-    if [[ -S "/tmp/.X11-unix/X${disp_try#:}" ]]; then
-      CURRENT_DISPLAY="$disp_try"
-      info "소켓으로 DISPLAY=$CURRENT_DISPLAY 감지"
-      break
-    fi
-  done
-fi
-
-[[ -z "$CURRENT_DISPLAY" ]] && CURRENT_DISPLAY=":0"
-info "사용할 DISPLAY: $CURRENT_DISPLAY"
-
-# XAUTH 파일 찾기
-XAUTH_FILE=$(sudo -u "$REAL_USER" bash -c \
-  'ls ~/.Xauthority 2>/dev/null \
-   || ls /run/user/'"$REAL_UID"'/gdm/Xauthority 2>/dev/null \
-   || find /run/user/'"$REAL_UID"' -name "*authority*" 2>/dev/null | head -1 \
-   || echo ""')
-[[ -z "$XAUTH_FILE" ]] && XAUTH_FILE="$REAL_HOME/.Xauthority"
-info "XAUTH 파일: $XAUTH_FILE"
-
 export DEBIAN_FRONTEND=noninteractive
 
 # ════════════════════════════════════════════════════════════
-# ── 방식 A: gnome-remote-desktop ─────────────────────────
+# [1] Wayland 비활성화 — x11vnc는 X11 전용
+#     Ubuntu 22.04+ 기본이 Wayland → x11vnc 연결 불가
 # ════════════════════════════════════════════════════════════
-if [[ "$USE_GRD" == "true" ]]; then
-  section "[A] gnome-remote-desktop 설정"
+section "[1] Wayland 비활성화 (GDM X11 강제)"
 
-  # 패키지 설치
-  apt-get $APT_PROXY_OPTS install -y gnome-remote-desktop 2>/dev/null || true
-
-  # 비밀번호 설정
-  if [[ -n "$VNC_PASSWORD" ]]; then
-    PASS="$VNC_PASSWORD"
+GDM_CONF="/etc/gdm3/custom.conf"
+if [[ -f "$GDM_CONF" ]]; then
+  if grep -q "WaylandEnable" "$GDM_CONF"; then
+    sed -i 's/^#*WaylandEnable=.*/WaylandEnable=false/' "$GDM_CONF"
   else
-    echo ""
-    read -rsp "VNC 비밀번호 입력 (최소 1자): " PASS
-    echo ""
+    if grep -q '^\[daemon\]' "$GDM_CONF"; then
+      sed -i '/^\[daemon\]/a WaylandEnable=false' "$GDM_CONF"
+    else
+      printf '\n[daemon]\nWaylandEnable=false\n' >> "$GDM_CONF"
+    fi
   fi
-
-  # gnome-remote-desktop VNC 활성화 (사용자 dconf/gsettings)
-  sudo -u "$REAL_USER" bash << GRDEOF
-export DBUS_SESSION_BUS_ADDRESS=\$(cat /proc/\$(pgrep -u $REAL_USER gnome-session | head -1)/environ 2>/dev/null | tr '\0' '\n' | grep DBUS_SESSION_BUS_ADDRESS | cut -d= -f2- || echo "")
-if [[ -z "\$DBUS_SESSION_BUS_ADDRESS" ]]; then
-  export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${REAL_UID}/bus"
+  success "GDM Wayland 비활성화 완료 ($GDM_CONF)"
+  warn "★ 현재 Wayland 세션이면 로그아웃 후 재로그인 필요 (로그인 화면 ⚙️ → 'Ubuntu on Xorg')"
+else
+  warn "GDM 설정 파일 없음 — LightDM 등 사용 중이면 X11이 이미 기본값"
 fi
 
-# VNC 활성화
-gsettings set org.gnome.desktop.remote-desktop.vnc auth-method 'password' 2>/dev/null || true
-gsettings set org.gnome.desktop.remote-desktop.vnc view-only false 2>/dev/null || true
+# ════════════════════════════════════════════════════════════
+# [2] 패키지 설치
+# ════════════════════════════════════════════════════════════
+section "[2] 필수 패키지 설치"
 
-# 비밀번호 설정
-if command -v grdctl &>/dev/null; then
-  grdctl vnc set-password '${PASS}' 2>/dev/null || true
-  grdctl vnc enable 2>/dev/null || true
-  echo "[GRD] grdctl 로 VNC 활성화 완료"
+apt-get $APT_PROXY_OPTS update -y
+
+apt-get $APT_PROXY_OPTS install -y xauth dbus-x11 2>/dev/null || true
+success "기본 패키지 완료"
+
+if [[ "$INSTALL_X11VNC" == "true" ]]; then
+  apt-get $APT_PROXY_OPTS install -y x11vnc \
+    && success "x11vnc 설치 완료" || warn "x11vnc 설치 실패"
 fi
-GRDEOF
 
-    # gnome-remote-desktop 서비스 활성화 (사용자 systemd)
-    sudo -u "$REAL_USER" systemctl --user enable gnome-remote-desktop 2>/dev/null || true
-    sudo -u "$REAL_USER" systemctl --user restart gnome-remote-desktop 2>/dev/null || true
-    success "gnome-remote-desktop 활성화 완료"
-    VNC_PORT=5900
-
-# ════════════════════════════════════════════════════════════
-# ── 방식 B: x11vnc ───────────────────────────────────────
-# ════════════════════════════════════════════════════════════
-elif [[ "$USE_X11VNC" == "true" ]]; then
-  section "[B] x11vnc 설치 및 설정"
-
-  # 패키지 설치
-  apt-get $APT_PROXY_OPTS update -y
-  apt-get $APT_PROXY_OPTS install -y x11vnc xauth
-  success "x11vnc 설치 완료"
-
-  # 비밀번호 설정
-  X11VNC_PASSWD_DIR="$REAL_HOME/.vnc"
-  sudo -u "$REAL_USER" mkdir -p "$X11VNC_PASSWD_DIR"
-  chmod 700 "$X11VNC_PASSWD_DIR"
-  chown "$REAL_USER:$REAL_USER" "$X11VNC_PASSWD_DIR"
-
-  if [[ -n "$VNC_PASSWORD" ]]; then
-    x11vnc -storepasswd "$VNC_PASSWORD" "$X11VNC_PASSWD_DIR/passwd"
-    chown "$REAL_USER:$REAL_USER" "$X11VNC_PASSWD_DIR/passwd"
-    chmod 600 "$X11VNC_PASSWD_DIR/passwd"
-    success "x11vnc 비밀번호 설정 완료 (비대화형)"
-  elif [[ -f "$X11VNC_PASSWD_DIR/passwd" ]]; then
-    warn "기존 비밀번호 파일 유지: $X11VNC_PASSWD_DIR/passwd"
-  else
-    info "x11vnc 비밀번호를 입력하세요:"
-    sudo -u "$REAL_USER" x11vnc -storepasswd "$X11VNC_PASSWD_DIR/passwd"
-    chmod 600 "$X11VNC_PASSWD_DIR/passwd"
-    success "x11vnc 비밀번호 설정 완료"
+if [[ "$INSTALL_TIGER" == "true" ]]; then
+  apt-get $APT_PROXY_OPTS install -y \
+    tigervnc-standalone-server tigervnc-common \
+    && success "TigerVNC 설치 완료" || warn "TigerVNC 설치 실패"
+  # GNOME 대신 XFCE: 가상 디스플레이에서 훨씬 안정적
+  if ! dpkg -l xfce4 2>/dev/null | grep -q "^ii"; then
+    info "XFCE 설치 중 (TigerVNC 가상 디스플레이용)..."
+    apt-get $APT_PROXY_OPTS install -y xfce4 xfce4-goodies dbus-x11 \
+      && success "XFCE 설치 완료" || warn "XFCE 설치 실패 — xterm 폴백 사용"
   fi
+fi
 
-  # ── systemd 서비스 생성 ──────────────────────────────────
-  SERVICE_NAME="x11vnc-${REAL_USER}"
-  SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+# ════════════════════════════════════════════════════════════
+# [3] VNC 비밀번호 설정
+# ════════════════════════════════════════════════════════════
+section "[3] VNC 비밀번호 설정"
 
-  # DISPLAY 감지 스크립트 (서비스 시작 시 동적으로 현재 DISPLAY 찾기)
-  DETECT_SCRIPT="/usr/local/bin/x11vnc-detect-display-${REAL_USER}.sh"
-  cat > "$DETECT_SCRIPT" << DETEOF
+VNC_DIR="$REAL_HOME/.vnc"
+sudo -u "$REAL_USER" mkdir -p "$VNC_DIR"
+chmod 700 "$VNC_DIR"
+chown "$REAL_USER:$REAL_USER" "$VNC_DIR"
+
+PASSWD_FILE="$VNC_DIR/passwd"
+
+if command -v x11vnc &>/dev/null; then
+  x11vnc -storepasswd "$VNC_PASS" "$PASSWD_FILE" 2>/dev/null
+elif command -v vncpasswd &>/dev/null; then
+  printf '%s\n%s\n' "$VNC_PASS" "$VNC_PASS" | vncpasswd "$PASSWD_FILE" 2>/dev/null
+fi
+chown "$REAL_USER:$REAL_USER" "$PASSWD_FILE"
+chmod 600 "$PASSWD_FILE"
+success "VNC 비밀번호 설정 완료: $PASSWD_FILE"
+
+# ════════════════════════════════════════════════════════════
+# [A] x11vnc — 로그인된 GNOME 세션 미러링 (포트 5900)
+#
+#  v3 문제점:
+#   - User= 시스템 서비스는 DISPLAY/XAUTHORITY 환경 없음
+#   - sleep 5 만으로는 부족 (세션 없으면 즉시 실패)
+#  v4 해결:
+#   - root로 실행 → 모든 xauth 파일 직접 읽기 가능
+#   - /proc/<pid>/environ 에서 DISPLAY+XAUTHORITY 추출
+#   - 폴링 루프: X 세션 나타날 때까지 계속 대기
+# ════════════════════════════════════════════════════════════
+if [[ "$INSTALL_X11VNC" == "true" ]] && command -v x11vnc &>/dev/null; then
+  section "[A] x11vnc 시스템 서비스 (GNOME 세션 미러링, 포트 ${X11VNC_PORT})"
+
+  X11VNC_SERVICE="x11vnc-mirror"
+  X11VNC_WRAPPER="/usr/local/bin/x11vnc-start-${REAL_USER}.sh"
+  X11VNC_LOG="/var/log/x11vnc-${REAL_USER}.log"
+
+  # 래퍼 스크립트: root 권한으로 X11 세션 감지 후 x11vnc 연결
+  cat > "$X11VNC_WRAPPER" << WRAPEOF
 #!/bin/bash
-# x11vnc 시작 전 현재 DISPLAY 동적 감지
-USER_NAME="${REAL_USER}"
-USER_ID="${REAL_UID}"
-PASSWD_FILE="${X11VNC_PASSWD_DIR}/passwd"
-VNC_PORT="${VNC_PORT}"
+# x11vnc 래퍼 — root로 실행, GNOME X11 세션 감지 후 연결
 
-# DISPLAY 및 XAUTH 자동 감지
-DISPLAY_VAL=""
-XAUTH_VAL=""
+TARGET_USER="${REAL_USER}"
+TARGET_UID="${REAL_UID}"
+PASSWD_FILE="${PASSWD_FILE}"
+VNC_PORT="${X11VNC_PORT}"
+LOG_FILE="${X11VNC_LOG}"
+MAX_WAIT=600   # 최대 10분 대기
+INTERVAL=5
 
-# gnome-shell PID 에서 DISPLAY 찾기
-for pid in \$(pgrep -u "\$USER_NAME" gnome-shell 2>/dev/null || pgrep -u "\$USER_NAME" gnome-session 2>/dev/null || pgrep -u "\$USER_NAME" Xorg 2>/dev/null); do
-  d=\$(cat /proc/\$pid/environ 2>/dev/null | tr '\0' '\n' | grep '^DISPLAY=' | cut -d= -f2)
-  a=\$(cat /proc/\$pid/environ 2>/dev/null | tr '\0' '\n' | grep '^XAUTHORITY=' | cut -d= -f2)
-  if [[ -n "\$d" ]]; then
-    DISPLAY_VAL="\$d"
-    XAUTH_VAL="\$a"
-    break
+log() { echo "\$(date '+%Y-%m-%d %H:%M:%S') \$*" | tee -a "\$LOG_FILE"; }
+
+find_x11_session() {
+  # gnome-shell / gnome-session / Xorg 프로세스의 environ 에서 추출
+  for proc in gnome-shell gnome-session Xorg; do
+    for pid in \$(pgrep -u "\$TARGET_USER" "\$proc" 2>/dev/null); do
+      [[ ! -r "/proc/\$pid/environ" ]] && continue
+      DISP=\$(tr '\0' '\n' < "/proc/\$pid/environ" | grep '^DISPLAY=' | cut -d= -f2-)
+      XAUTH=\$(tr '\0' '\n' < "/proc/\$pid/environ" | grep '^XAUTHORITY=' | cut -d= -f2-)
+      if [[ -n "\$DISP" && -n "\$XAUTH" && -f "\$XAUTH" ]]; then
+        echo "\$DISP|\$XAUTH"
+        return 0
+      fi
+      # XAUTHORITY 없어도 DISPLAY는 있는 경우
+      if [[ -n "\$DISP" ]]; then
+        # 후보 xauth 파일 시도
+        for xauth_try in \
+          "/run/user/\${TARGET_UID}/gdm/Xauthority" \
+          "/home/\${TARGET_USER}/.Xauthority" \
+          "\$(find /run/user/\${TARGET_UID} -name '*authority*' 2>/dev/null | head -1)"; do
+          [[ -f "\$xauth_try" ]] || continue
+          if DISPLAY="\$DISP" XAUTHORITY="\$xauth_try" xdpyinfo &>/dev/null 2>&1; then
+            echo "\$DISP|\$xauth_try"
+            return 0
+          fi
+        done
+      fi
+    done
+  done
+
+  # X 소켓만 있는 경우 (DISPLAY가 직접 안 잡힐 때)
+  for disp_num in 0 1 2; do
+    [[ -S "/tmp/.X11-unix/X\${disp_num}" ]] || continue
+    for xauth_try in \
+      "/run/user/\${TARGET_UID}/gdm/Xauthority" \
+      "/home/\${TARGET_USER}/.Xauthority"; do
+      [[ -f "\$xauth_try" ]] || continue
+      if DISPLAY=":\${disp_num}" XAUTHORITY="\$xauth_try" xdpyinfo &>/dev/null 2>&1; then
+        echo ":\${disp_num}|\$xauth_try"
+        return 0
+      fi
+    done
+  done
+
+  return 1
+}
+
+log "x11vnc 래퍼 시작 (사용자: \$TARGET_USER, 포트: \$VNC_PORT)"
+WAITED=0
+
+while [[ \$WAITED -lt \$MAX_WAIT ]]; do
+  SESSION=\$(find_x11_session)
+  if [[ -n "\$SESSION" ]]; then
+    DISP=\$(cut -d'|' -f1 <<< "\$SESSION")
+    XAUTH=\$(cut -d'|' -f2 <<< "\$SESSION")
+    log "X11 세션 발견: DISPLAY=\$DISP XAUTHORITY=\$XAUTH"
+    log "x11vnc 시작..."
+    /usr/bin/x11vnc \
+      -display "\$DISP" \
+      -auth "\$XAUTH" \
+      -rfbauth "\$PASSWD_FILE" \
+      -rfbport "\$VNC_PORT" \
+      -forever \
+      -shared \
+      -noxrecord \
+      -noxdamage \
+      -noxfixes \
+      -repeat \
+      -o "\$LOG_FILE"
+    log "x11vnc 종료 — 5초 후 재시도..."
+    sleep 5
+    WAITED=0   # 재연결 시도 시 카운터 리셋
+  else
+    (( WAITED % 60 == 0 )) && log "X11 세션 대기 중... \${WAITED}초 경과"
+    sleep \$INTERVAL
+    WAITED=\$(( WAITED + INTERVAL ))
   fi
 done
 
-# 폴백
-[[ -z "\$DISPLAY_VAL" ]] && DISPLAY_VAL=":0"
-[[ -z "\$XAUTH_VAL" ]] && XAUTH_VAL="/home/\${USER_NAME}/.Xauthority"
+log "최대 대기 시간(\${MAX_WAIT}초) 초과. 서비스 종료."
+exit 1
+WRAPEOF
+  chmod +x "$X11VNC_WRAPPER"
 
-echo "감지된 DISPLAY=\$DISPLAY_VAL  XAUTHORITY=\$XAUTH_VAL"
-
-exec /usr/bin/x11vnc \\
-  -display "\$DISPLAY_VAL" \\
-  -auth "\$XAUTH_VAL" \\
-  -rfbauth "\$PASSWD_FILE" \\
-  -rfbport "\$VNC_PORT" \\
-  -forever \\
-  -shared \\
-  -noxdamage \\
-  -repeat \\
-  -loop \\
-  -o /var/log/x11vnc-\${USER_NAME}.log
-DETEOF
-  chmod +x "$DETECT_SCRIPT"
-
-  cat > "$SERVICE_FILE" << EOF
+  cat > "/etc/systemd/system/${X11VNC_SERVICE}.service" << SVCEOF
 [Unit]
-Description=x11vnc VNC Server for ${REAL_USER} (GNOME session mirror)
-Documentation=man:x11vnc(1)
+Description=x11vnc VNC Mirror for ${REAL_USER} (GNOME session)
 After=graphical.target network.target
 Wants=graphical.target
 
 [Service]
 Type=simple
-User=${REAL_USER}
-# GNOME 세션이 완전히 뜨기까지 대기
-ExecStartPre=/bin/sleep 5
-ExecStart=${DETECT_SCRIPT}
-Restart=on-failure
+User=root
+ExecStart=${X11VNC_WRAPPER}
+Restart=always
 RestartSec=10
-# GNOME 세션 없으면 재시작 계속 시도 (로그인 후 자동 연결)
 StartLimitIntervalSec=0
 
 [Install]
 WantedBy=graphical.target
-EOF
+SVCEOF
 
   systemctl daemon-reload
-  systemctl enable "${SERVICE_NAME}"
+  systemctl enable "${X11VNC_SERVICE}"
+  systemctl restart "${X11VNC_SERVICE}" 2>/dev/null || true
 
-  # 현재 GNOME 세션이 있으면 즉시 시작
-  if pgrep -u "$REAL_USER" gnome-shell &>/dev/null || pgrep -u "$REAL_USER" gnome-session &>/dev/null; then
-    systemctl restart "${SERVICE_NAME}" \
-      && success "${SERVICE_NAME} 시작 완료" \
-      || warn "${SERVICE_NAME} 시작 실패 — 로그: journalctl -u ${SERVICE_NAME}"
+  if systemctl is-active "${X11VNC_SERVICE}" &>/dev/null; then
+    success "x11vnc 서비스 시작 완료 (포트 ${X11VNC_PORT})"
   else
-    warn "현재 GNOME 세션 없음 — 서비스는 등록됨, GNOME 로그인 후 자동 시작됩니다."
+    warn "x11vnc 서비스 시작됨 (X11 세션 감지 대기 중)"
+    info "  상태 확인: systemctl status ${X11VNC_SERVICE}"
   fi
+fi
+
+# ════════════════════════════════════════════════════════════
+# [B] TigerVNC 독립 서버 — 헤드리스/항상 동작 (포트 5901)
+#
+#  GNOME보다 XFCE가 가상 디스플레이에서 훨씬 안정적
+#  loginctl enable-linger 으로 로그인 없이 부팅 후 자동 시작
+# ════════════════════════════════════════════════════════════
+if [[ "$INSTALL_TIGER" == "true" ]] && command -v vncserver &>/dev/null; then
+  section "[B] TigerVNC 독립 서버 (XFCE 헤드리스, 포트 ${TIGER_PORT})"
+
+  TIGER_DISP="${TIGER_PORT##590}"
+  [[ -z "$TIGER_DISP" || "$TIGER_DISP" -le 0 ]] && TIGER_DISP=1
+
+  # xstartup
+  cat > "$VNC_DIR/xstartup" << 'STARTEOF'
+#!/bin/bash
+unset SESSION_MANAGER
+unset DBUS_SESSION_BUS_ADDRESS
+
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+mkdir -p "$XDG_RUNTIME_DIR" && chmod 0700 "$XDG_RUNTIME_DIR"
+
+[ -x /usr/bin/xsetroot ] && xsetroot -solid grey &
+
+# D-Bus 세션
+command -v dbus-launch &>/dev/null && eval "$(dbus-launch --sh-syntax)"
+
+# 데스크톱: XFCE → GNOME → xterm 폴백
+if command -v startxfce4 &>/dev/null; then
+  exec startxfce4
+elif command -v gnome-session &>/dev/null; then
+  export LIBGL_ALWAYS_SOFTWARE=1
+  exec gnome-session
+else
+  exec xterm -geometry 80x24+0+0 -ls
+fi
+STARTEOF
+  chmod +x "$VNC_DIR/xstartup"
+
+  # TigerVNC 설정
+  cat > "$VNC_DIR/config" << CFGEOF
+geometry=1920x1080
+depth=24
+dpi=96
+localhost=no
+CFGEOF
+
+  chown -R "$REAL_USER:$REAL_USER" "$VNC_DIR"
+
+  # loginctl enable-linger: 로그인 없이도 user 서비스 실행
+  loginctl enable-linger "$REAL_USER" && success "loginctl enable-linger 설정" \
+    || warn "enable-linger 실패 — 로그인 후에만 자동 시작"
+
+  # user systemd 서비스
+  USER_SD_DIR="$REAL_HOME/.config/systemd/user"
+  sudo -u "$REAL_USER" mkdir -p "$USER_SD_DIR"
+
+  # 기존 vncserver 정리
+  sudo -u "$REAL_USER" vncserver -kill ":${TIGER_DISP}" 2>/dev/null || true
+  rm -f "/tmp/.X${TIGER_DISP}-lock" 2>/dev/null || true
+
+  cat > "${USER_SD_DIR}/tigervnc.service" << TSVC
+[Unit]
+Description=TigerVNC Standalone VNC Server :${TIGER_DISP} (XFCE headless)
+After=network.target
+
+[Service]
+Type=forking
+ExecStart=/usr/bin/vncserver :${TIGER_DISP} -rfbport ${TIGER_PORT} -rfbauth ${PASSWD_FILE} -localhost no
+ExecStop=/usr/bin/vncserver -kill :${TIGER_DISP}
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+TSVC
+
+  chown -R "$REAL_USER:$REAL_USER" "$REAL_HOME/.config"
+
+  # user 서비스 활성화/시작
+  # machinectl shell 이 sudo 컨텍스트에서 user systemd 접근하는 가장 신뢰성 높은 방법
+  TIGER_STARTED=false
+  if command -v machinectl &>/dev/null; then
+    machinectl shell "${REAL_USER}@.host" /bin/bash -c \
+      "systemctl --user daemon-reload && \
+       systemctl --user enable tigervnc && \
+       systemctl --user restart tigervnc" 2>/dev/null \
+    && TIGER_STARTED=true && success "TigerVNC user 서비스 시작 (machinectl)"
+  fi
+
+  if [[ "$TIGER_STARTED" == "false" ]]; then
+    # 폴백: 직접 vncserver 실행
+    sudo -u "$REAL_USER" bash -c \
+      "XDG_RUNTIME_DIR=/run/user/${REAL_UID} \
+       vncserver :${TIGER_DISP} -rfbport ${TIGER_PORT} -rfbauth ${PASSWD_FILE} -localhost no" \
+      2>/dev/null \
+    && TIGER_STARTED=true && success "TigerVNC 직접 시작 완료 (포트 ${TIGER_PORT})"
+  fi
+
+  [[ "$TIGER_STARTED" == "false" ]] && \
+    warn "TigerVNC 시작 실패 — 수동: sudo -u ${REAL_USER} vncserver :${TIGER_DISP} -rfbport ${TIGER_PORT} -rfbauth ${PASSWD_FILE} -localhost no"
 fi
 
 # ════════════════════════════════════════════════════════════
@@ -360,18 +467,14 @@ section "UFW 방화벽 설정"
 
 if [[ "$SKIP_FIREWALL" == "true" ]]; then
   warn "방화벽 설정 건너뜀"
-elif command -v ufw &>/dev/null; then
-  ufw allow "${VNC_PORT}/tcp" comment "VNC" 2>/dev/null \
-    && success "UFW: 포트 ${VNC_PORT}/tcp 오픈" || true
-  if ! ufw status 2>/dev/null | grep -qE "22/tcp|OpenSSH"; then
-    ufw allow 22/tcp comment "SSH" 2>/dev/null && success "UFW: SSH(22/tcp) 오픈" || true
-  fi
-  ufw --force enable 2>/dev/null && success "UFW 활성화" || true
 else
   apt-get $APT_PROXY_OPTS install -y ufw 2>/dev/null || true
-  ufw allow "${VNC_PORT}/tcp" 2>/dev/null || true
-  ufw allow 22/tcp 2>/dev/null || true
-  ufw --force enable 2>/dev/null || true
+  [[ "$INSTALL_X11VNC" == "true" ]] && \
+    ufw allow "${X11VNC_PORT}/tcp" comment "VNC-x11vnc"  2>/dev/null || true
+  [[ "$INSTALL_TIGER"  == "true" ]] && \
+    ufw allow "${TIGER_PORT}/tcp"  comment "VNC-TigerVNC" 2>/dev/null || true
+  ufw allow 22/tcp comment "SSH" 2>/dev/null || true
+  ufw --force enable 2>/dev/null && success "UFW 활성화" || true
 fi
 
 # ════════════════════════════════════════════════════════════
@@ -380,45 +483,53 @@ fi
 section "동작 확인"
 
 sleep 3
-if ss -tlnp 2>/dev/null | grep -q ":${VNC_PORT}"; then
-  success "포트 ${VNC_PORT} LISTEN 확인 ✓"
-else
-  warn "포트 ${VNC_PORT} 아직 LISTEN 안 됨"
-  info "확인: ss -tlnp | grep ${VNC_PORT}"
+if [[ "$INSTALL_X11VNC" == "true" ]]; then
+  if ss -tlnp 2>/dev/null | grep -q ":${X11VNC_PORT}"; then
+    success "x11vnc 포트 ${X11VNC_PORT} LISTEN ✓"
+  else
+    warn "x11vnc 포트 ${X11VNC_PORT} 아직 LISTEN 안 됨 — X11 세션 대기 중 (정상)"
+  fi
+fi
+if [[ "$INSTALL_TIGER" == "true" ]]; then
+  if ss -tlnp 2>/dev/null | grep -q ":${TIGER_PORT}"; then
+    success "TigerVNC 포트 ${TIGER_PORT} LISTEN ✓"
+  else
+    warn "TigerVNC 포트 ${TIGER_PORT} LISTEN 안 됨"
+  fi
 fi
 
 SERVER_IPS=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -Ev '^$|^127\.' | head -5 || echo "")
+TIGER_DISP_FINAL="${TIGER_PORT##590}"
+[[ -z "$TIGER_DISP_FINAL" || "$TIGER_DISP_FINAL" -le 0 ]] && TIGER_DISP_FINAL=1
 
 # ════════════════════════════════════════════════════════════
 # 완료 안내
 # ════════════════════════════════════════════════════════════
 echo ""
-echo -e "${GREEN}╔══════════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║  ✅  VNC 원격 접속 설정 완료!                       ║${NC}"
-echo -e "${GREEN}╚══════════════════════════════════════════════════════╝${NC}"
+echo -e "${GREEN}╔══════════════════════════════════════════════════════════╗${NC}"
+echo -e "${GREEN}║  ✅  VNC 원격 접속 설정 완료 (v4)                       ║${NC}"
+echo -e "${GREEN}╚══════════════════════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "${BOLD}  방식: $([ "$USE_GRD" == "true" ] && echo "gnome-remote-desktop (GNOME 내장)" || echo "x11vnc (GNOME 세션 미러링)")${NC}"
-echo "  포트: ${VNC_PORT}"
+echo -e "${BOLD}▶ 접속 주소:${NC}"
+while read -r ip; do
+  [[ -z "$ip" ]] && continue
+  [[ "$INSTALL_X11VNC" == "true" ]] && \
+    echo -e "  ${CYAN}[A] GNOME 미러  (x11vnc)${NC}   →  ${ip}:${X11VNC_PORT}  (GNOME 로그인 후 활성화)"
+  [[ "$INSTALL_TIGER"  == "true" ]] && \
+    echo -e "  ${CYAN}[B] XFCE 헤드리스 (TigerVNC)${NC} →  ${ip}:${TIGER_PORT}  (항상 동작)"
+done <<< "$SERVER_IPS"
 echo ""
-if [[ -n "$SERVER_IPS" ]]; then
-  echo -e "${BOLD}  VNC 클라이언트 접속 주소:${NC}"
-  while read -r ip; do
-    [[ -z "$ip" ]] && continue
-    echo "    ${ip}:${VNC_PORT}"
-  done <<< "$SERVER_IPS"
-  echo ""
-fi
-echo -e "${BOLD}  TigerVNC Viewer 접속 방법:${NC}"
-echo "    주소창에 입력:  서버IP:${VNC_PORT}  또는  서버IP::$(( VNC_PORT - 5900 ))"
+echo -e "${BOLD}▶ Wayland 주의:${NC}"
+echo "  x11vnc 는 X11 전용. 현재 Wayland 세션이면:"
+echo "  로그아웃 → GDM 로그인 화면 ⚙️ → 'Ubuntu on Xorg' 선택 후 로그인"
 echo ""
-if [[ "$USE_X11VNC" == "true" ]]; then
-  echo -e "${BOLD}  서비스 관리:${NC}"
-  echo "    상태:   sudo systemctl status ${SERVICE_NAME:-x11vnc}"
-  echo "    재시작: sudo systemctl restart ${SERVICE_NAME:-x11vnc}"
-  echo "    로그:   sudo tail -f /var/log/x11vnc-${REAL_USER}.log"
-fi
+echo -e "${BOLD}▶ 서비스 관리:${NC}"
+[[ "$INSTALL_X11VNC" == "true" ]] && echo "  x11vnc:    sudo systemctl status/restart x11vnc-mirror"
+[[ "$INSTALL_X11VNC" == "true" ]] && echo "  x11vnc 로그: sudo tail -f /var/log/x11vnc-${REAL_USER}.log"
+[[ "$INSTALL_TIGER"  == "true" ]] && echo "  TigerVNC 시작: sudo -u ${REAL_USER} vncserver :${TIGER_DISP_FINAL} -rfbport ${TIGER_PORT} -rfbauth ${PASSWD_FILE} -localhost no"
+[[ "$INSTALL_TIGER"  == "true" ]] && echo "  TigerVNC 중지: sudo -u ${REAL_USER} vncserver -kill :${TIGER_DISP_FINAL}"
 echo ""
-echo -e "${BOLD}  SSH 터널 (보안 접속):${NC}"
-echo "    ssh -L 5901:localhost:${VNC_PORT} ${REAL_USER}@<서버IP>"
-echo "    → VNC 클라이언트: localhost:5901"
+echo -e "${BOLD}▶ SSH 터널 (보안 접속 권장):${NC}"
+[[ "$INSTALL_X11VNC" == "true" ]] && echo "  ssh -L 5900:localhost:${X11VNC_PORT} ${REAL_USER}@<서버IP>  → VNC: localhost:5900"
+[[ "$INSTALL_TIGER"  == "true" ]] && echo "  ssh -L 5901:localhost:${TIGER_PORT}  ${REAL_USER}@<서버IP>  → VNC: localhost:5901"
 echo ""
