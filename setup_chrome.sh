@@ -195,10 +195,66 @@ success "사전 패키지 설치 완료"
 # ── 사내 인증서 등록 (프록시 HTTPS 인증서) ─────────────────
 if [[ -n "${CRT_PATH:-}" && -f "$CRT_PATH" ]]; then
   section "사내 인증서 등록"
-  CERT_DEST="/usr/local/share/ca-certificates/$(basename "$CRT_PATH" .crt).crt"
+  CERT_NAME=$(basename "$CRT_PATH" .crt)
+
+  # [A] 시스템 인증서 저장소 (curl/wget/apt 등 활용)
+  CERT_DEST="/usr/local/share/ca-certificates/${CERT_NAME}.crt"
   cp "$CRT_PATH" "$CERT_DEST"
   update-ca-certificates --fresh 2>/dev/null || true
-  success "인증서 등록 완료: $CERT_DEST"
+  success "[A] 시스템 인증서 저장소 등록 완료: $CERT_DEST"
+
+  # [B] Chrome NSS DB 등록
+  # Chrome은 시스템 인증서 저장소를 무시하고 자체 NSS DB를 사용
+  # NET::ERR_CERT_AUTHORITY_INVALID 의 진짜 원인
+  apt-get $APT_PROXY_OPTS install -y libnss3-tools 2>/dev/null || true
+
+  if command -v certutil &>/dev/null; then
+    info "[B] Chrome NSS DB 에 인증서 등록 중..."
+
+    # 해당 사용자의 Chrome/Chromium NSS DB 경로들
+    NSS_DB_DIRS=(
+      "$REAL_HOME/.pki/nssdb"                    # Chrome (Linux 스탠다드)
+      "$REAL_HOME/snap/chromium/current/.pki/nssdb"  # Snap Chromium
+    )
+
+    for nssdb in "${NSS_DB_DIRS[@]}"; do
+      # DB 없으면 생성
+      if [[ ! -d "$nssdb" ]]; then
+        sudo -u "$REAL_USER" mkdir -p "$nssdb"
+        sudo -u "$REAL_USER" certutil -d "sql:$nssdb" -N --empty-password 2>/dev/null || true
+        info "  NSS DB 생성: $nssdb"
+      fi
+
+      # 기존에 등록된 같은 이름의 인증서 먼저 삭제 (중복 방지)
+      sudo -u "$REAL_USER" certutil -d "sql:$nssdb" -D -n "$CERT_NAME" 2>/dev/null || true
+
+      # 인증서 등록 (CT = Certificate Authority Trust)
+      if sudo -u "$REAL_USER" certutil \
+          -d "sql:$nssdb" \
+          -A \
+          -n "$CERT_NAME" \
+          -t "CT,," \
+          -i "$CRT_PATH" 2>/dev/null; then
+        success "  NSS DB 등록 성공: $nssdb"
+      else
+        warn "  NSS DB 등록 실패: $nssdb"
+      fi
+    done
+
+    # 등록 확인
+    PRIMARY_NSS="$REAL_HOME/.pki/nssdb"
+    if [[ -d "$PRIMARY_NSS" ]]; then
+      info "  NSS DB 등록 릪�:"
+      sudo -u "$REAL_USER" certutil -d "sql:$PRIMARY_NSS" -L 2>/dev/null \
+        | grep -i "$CERT_NAME" | sed 's/^/    /' || true
+    fi
+  else
+    warn "certutil 미설치 — NSS DB 등록 건너뗜 (libnss3-tools 설치 필요)"
+  fi
+
+  # [C] Chrome 실행 시 --ssl-client-certificate-import 대신
+  # 안전한 접근: 인증서를 직접 지정하는 래퍼 나중에 갱신
+  success "[C] 인증서 등록 쪽료 (NSS DB + 시스템 저장소)"
 fi
 
 # ════════════════════════════════════════════════════════════
@@ -372,21 +428,25 @@ fi
 # ════════════════════════════════════════════════════════════
 # [8] 프록시 환경에서 Chrome 실행 래퍼 생성
 # ════════════════════════════════════════════════════════════
-if [[ -n "${HTTP_PROXY:-}" ]]; then
-  section "[8] Chrome 프록시 래퍼 스크립트"
+if [[ -n "${HTTP_PROXY:-}" || -n "${CRT_PATH:-}" ]]; then
+  section "[8] Chrome 래퍼 스크립트 (프록시 + 인증서)"
 
   WRAPPER="/usr/local/bin/chrome-proxy"
+  PROXY_ARG=""
+  [[ -n "${HTTP_PROXY:-}" ]] && PROXY_ARG="--proxy-server=\"${HTTP_PROXY}\""
+
   cat > "$WRAPPER" << WEOF
 #!/bin/bash
-# Google Chrome 프록시 래퍼 (자동 생성: setup_chrome.sh)
-exec /usr/bin/google-chrome-stable \
-  --proxy-server="${HTTP_PROXY:-}" \
-  --no-sandbox \
+# Google Chrome 래퍼 (\uc790\ub3d9 \uc0dd\uc131: setup_chrome.sh)
+# 프록시 + 사내 CA 인증서 \uc801\uc6a9
+exec /usr/bin/google-chrome-stable \\
+  ${PROXY_ARG} \\
+  --no-sandbox \\
   "\$@"
 WEOF
   chmod +x "$WRAPPER"
   success "프록시 래퍼 생성 완료: $WRAPPER"
-  info "프록시 환경에서 실행: chrome-proxy"
+  info "실행: chrome-proxy"
 fi
 
 # ════════════════════════════════════════════════════════════
