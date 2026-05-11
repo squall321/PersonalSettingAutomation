@@ -48,7 +48,14 @@ yaml_get() {
 import sys, re
 
 def parse_yaml_simple(path):
-    """간단한 2-depth YAML 파서 (PyYAML 없이)"""
+    """간단한 2-depth YAML 파서 (PyYAML 없이)
+    인라인 주석(' # ...') 제거 — 'true    # comment' 가 'true' 로 정확히 파싱되도록.
+    """
+    def strip_inline_comment(s):
+        # 공백 + # 이후를 잘라냄 (URL 같은 값에서 fragment 식별자 보호)
+        s = re.sub(r'\s+#.*$', '', s)
+        return s.strip().strip('"\'')
+
     data = {}
     current_section = None
     with open(path) as f:
@@ -60,9 +67,9 @@ def parse_yaml_simple(path):
             m = re.match(r'^(\w[\w-]*):\s*(.*)', line)
             if m:
                 current_section = m.group(1)
-                val = m.group(2).strip()
+                val = strip_inline_comment(m.group(2))
                 if val and not val.startswith('#'):
-                    data[current_section] = val.strip('"\'')
+                    data[current_section] = val
                 else:
                     data[current_section] = {}
                 continue
@@ -70,7 +77,7 @@ def parse_yaml_simple(path):
             m = re.match(r'^\s{2,}([\w-]+):\s*(.*)', line)
             if m and isinstance(data.get(current_section), dict):
                 k = m.group(1)
-                v = m.group(2).strip().strip('"\'')
+                v = strip_inline_comment(m.group(2))
                 if v.startswith('#'):
                     v = ''
                 data[current_section][k] = v
