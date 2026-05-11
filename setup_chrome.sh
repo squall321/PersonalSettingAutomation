@@ -399,9 +399,81 @@ else
 fi
 
 # ════════════════════════════════════════════════════════════
-# [6] 설치 확인
+# [6] 사내 인증서 → Chrome 등록 (NSS DB + 정책 파일)
 # ════════════════════════════════════════════════════════════
-section "[6] 설치 확인"
+# Chrome은 시스템 CA 저장소를 무시함 → NET::ERR_CERT_AUTHORITY_INVALID 원인
+# 해결: NSS DB 직접 등록 + 정책 파일로 강제 신뢰
+if [[ -n "${CRT_PATH:-}" && -f "$CRT_PATH" ]]; then
+  section "[6] Chrome 인증서 등록 (NSS DB + 정책 파일)"
+  CERT_NAME=$(basename "$CRT_PATH" .crt)
+
+  # ── [B] libnss3-tools 설치 ──────────────────────────────
+  apt-get $APT_PROXY_OPTS install -y libnss3-tools 2>/dev/null || true
+
+  # ── [C] NSS DB 등록 ─────────────────────────────────────
+  # Chrome 첫 실행 전에 DB를 만들어두면 덮어써지는 문제가 있음
+  # → Chrome 설치 후 이 시점에 실행해야 안전
+  if command -v certutil &>/dev/null; then
+    info "[C] Chrome NSS DB 에 인증서 등록 중..."
+
+    NSS_DB_DIRS=(
+      "$REAL_HOME/.pki/nssdb"                        # Chrome (Linux 표준)
+      "$REAL_HOME/snap/chromium/current/.pki/nssdb"  # Snap Chromium
+    )
+
+    for nssdb in "${NSS_DB_DIRS[@]}"; do
+      if [[ ! -d "$nssdb" ]]; then
+        sudo -u "$REAL_USER" mkdir -p "$nssdb"
+        sudo -u "$REAL_USER" certutil -d "sql:$nssdb" -N --empty-password 2>/dev/null || true
+        info "  NSS DB 생성: $nssdb"
+      fi
+      sudo -u "$REAL_USER" certutil -d "sql:$nssdb" -D -n "$CERT_NAME" 2>/dev/null || true
+      if sudo -u "$REAL_USER" certutil \
+          -d "sql:$nssdb" -A -n "$CERT_NAME" -t "CT,," -i "$CRT_PATH" 2>/dev/null; then
+        success "  NSS DB 등록 성공: $nssdb"
+      else
+        warn "  NSS DB 등록 실패: $nssdb"
+      fi
+    done
+  else
+    warn "certutil 미설치 — NSS DB 등록 건너뜀"
+  fi
+
+  # ── [D] Chrome 정책 파일 (가장 확실한 방법) ──────────────
+  # managed policy는 사용자가 변경 불가, Chrome이 항상 신뢰
+  info "[D] Chrome 정책 파일로 인증서 강제 신뢰..."
+  POLICY_DIR="/etc/opt/chrome/policies/managed"
+  mkdir -p "$POLICY_DIR"
+
+  # CRT → PEM (certutil/openssl로 Base64 확인)
+  # .crt 파일이 DER(바이너리)이면 PEM으로 변환 필요
+  PEM_FILE="/tmp/${CERT_NAME}.pem"
+  if file "$CRT_PATH" | grep -qi 'PEM\|ASCII\|text'; then
+    cp "$CRT_PATH" "$PEM_FILE"
+  else
+    openssl x509 -inform DER -in "$CRT_PATH" -out "$PEM_FILE" 2>/dev/null \
+      || cp "$CRT_PATH" "$PEM_FILE"
+  fi
+
+  # PEM 내용을 JSON에 인라인 (줄바꿈 → \n)
+  CERT_PEM_INLINE=$(awk 'NR>1{printf "%s\\n", prev} {prev=$0} END{printf "%s", prev}' "$PEM_FILE")
+  rm -f "$PEM_FILE"
+
+  cat > "${POLICY_DIR}/01_corp_ca.json" << POLICYEOF
+{
+  "CACertificates": [
+    "${CERT_PEM_INLINE}"
+  ]
+}
+POLICYEOF
+  chmod 644 "${POLICY_DIR}/01_corp_ca.json"
+  success "[D] Chrome 정책 파일 등록 완료: ${POLICY_DIR}/01_corp_ca.json"
+fi
+
+# ════════════════════════════════════════════════════════════
+# [7] 설치 확인
+# ════════════════════════════════════════════════════════════
+section "[7] 설치 확인"
 
 CHROME_BIN=$(command -v google-chrome-stable 2>/dev/null \
   || command -v google-chrome 2>/dev/null \
@@ -416,10 +488,10 @@ else
 fi
 
 # ════════════════════════════════════════════════════════════
-# [7] 기본 브라우저 설정
+# [8] 기본 브라우저 설정
 # ════════════════════════════════════════════════════════════
 if [[ "$SET_DEFAULT" == "true" ]]; then
-  section "[7] 기본 브라우저 설정"
+  section "[8] 기본 브라우저 설정"
   sudo -u "$REAL_USER" xdg-settings set default-web-browser google-chrome.desktop 2>/dev/null \
     && success "기본 브라우저: Google Chrome" \
     || warn "기본 브라우저 설정 실패 (GUI 세션 없음 — VNC 접속 후 수동 설정 가능)"
@@ -429,7 +501,7 @@ fi
 # [8] 프록시 환경에서 Chrome 실행 래퍼 생성
 # ════════════════════════════════════════════════════════════
 if [[ -n "${HTTP_PROXY:-}" || -n "${CRT_PATH:-}" ]]; then
-  section "[8] Chrome 래퍼 스크립트 (프록시 + 인증서)"
+  section "[9] Chrome 래퍼 스크립트 (프록시 + 인증서)"
 
   WRAPPER="/usr/local/bin/chrome-proxy"
   PROXY_ARG=""
