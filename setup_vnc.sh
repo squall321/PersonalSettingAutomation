@@ -450,7 +450,9 @@ Environment=USER=${REAL_USER}
 Environment=SHELL=/bin/bash
 Environment=XDG_RUNTIME_DIR=/run/user/${REAL_UID}
 ExecStartPre=-/usr/bin/vncserver -kill :${TIGER_DISP}
-ExecStartPre=/bin/bash -c 'rm -f /tmp/.X${TIGER_DISP}-lock /tmp/.X11-unix/X${TIGER_DISP}; mkdir -p /tmp/.X11-unix; chmod 1777 /tmp/.X11-unix'
+# /tmp/.X11-unix 는 root 소유 시스템 디렉토리 — User=일반유저는 chmod 불가
+# 잔여 lock/socket 만 정리하고 mkdir/chmod 는 건드리지 않음
+ExecStartPre=-/bin/rm -f /tmp/.X${TIGER_DISP}-lock /tmp/.X11-unix/X${TIGER_DISP}
 ExecStart=/usr/bin/vncserver -fg :${TIGER_DISP} -geometry 1920x1080 -depth 24 -localhost no
 ExecStop=/usr/bin/vncserver -kill :${TIGER_DISP}
 Restart=on-failure
