@@ -402,13 +402,17 @@ WorkingDirectory=${REAL_HOME}
 # PIDFile: vncserver 가 생성하는 실제 경로 (hostname:display.pid)
 PIDFile=${PID_FILE}
 
-# ── 시작 전: stale lock/pid 파일 정리 ─────────────────────────
-# 이전 비정상 종료 시 잔존 파일로 인한 "already running" 오류 방지
+# ── 시작 전 정리 [1]: root 권한으로 /tmp 잠금 파일 삭제 ────────
+# User= 권한(일반유저)으로는 root 소유 /tmp/.X?-lock 삭제 불가
+# → PermissionsStartOnly 없이 root로 실행하려면 별도 ExecStartPre 사용
 ExecStartPre=/bin/bash -c '\
+  rm -f /tmp/.X${VNC_DISPLAY}-lock; \
+  rm -f /tmp/.X11-unix/X${VNC_DISPLAY}'
+
+# ── 시작 전 정리 [2]: 사용자 권한으로 기존 vncserver 종료 ──────
+ExecStartPre=/bin/su - ${REAL_USER} -c '\
   /usr/bin/vncserver -kill :${VNC_DISPLAY} >/dev/null 2>&1 || true; \
   rm -f ${VNC_PASSWD_DIR}/*:${VNC_DISPLAY}.pid; \
-  rm -f /tmp/.X${VNC_DISPLAY}-lock; \
-  rm -f /tmp/.X11-unix/X${VNC_DISPLAY}; \
   sleep 1'
 
 ExecStart=/usr/bin/vncserver :${VNC_DISPLAY} \
@@ -419,7 +423,10 @@ ExecStart=/usr/bin/vncserver :${VNC_DISPLAY} \
   -rfbauth ${VNC_PASSWD_DIR}/passwd \
   -log "*:stderr:30"
 
-ExecStop=/bin/bash -c '/usr/bin/vncserver -kill :${VNC_DISPLAY} >/dev/null 2>&1 || true'
+ExecStop=/bin/bash -c '\
+  /usr/bin/vncserver -kill :${VNC_DISPLAY} >/dev/null 2>&1 || true; \
+  rm -f /tmp/.X${VNC_DISPLAY}-lock; \
+  rm -f /tmp/.X11-unix/X${VNC_DISPLAY}'
 
 # ── 비정상 종료 시 자동 재시작 (10초 후) ──────────────────────
 Restart=on-failure
@@ -439,13 +446,12 @@ systemctl daemon-reload
 # 혹시 기존에 실행 중이면 중지
 systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
 
-# 기존 stale 프로세스 강제 정리
-sudo -u "$REAL_USER" bash -c "
-  vncserver -kill :${VNC_DISPLAY} >/dev/null 2>&1 || true
-  rm -f ${VNC_PASSWD_DIR}/*:${VNC_DISPLAY}.pid
-  rm -f /tmp/.X${VNC_DISPLAY}-lock
-  rm -f /tmp/.X11-unix/X${VNC_DISPLAY}
-" 2>/dev/null || true
+# 기존 stale 프로세스 강제 정리 (root 권한으로 /tmp lock 파일까지 삭제)
+sudo -u "$REAL_USER" bash -c "vncserver -kill :${VNC_DISPLAY} >/dev/null 2>&1 || true" 2>/dev/null || true
+rm -f "${VNC_PASSWD_DIR}"/*:${VNC_DISPLAY}.pid
+rm -f /tmp/.X${VNC_DISPLAY}-lock
+rm -f /tmp/.X11-unix/X${VNC_DISPLAY}
+info "stale 잠금 파일 정리 완료"
 sleep 1
 
 systemctl enable "${SERVICE_NAME}" \
