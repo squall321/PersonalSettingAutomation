@@ -372,8 +372,9 @@ fi
 # ════════════════════════════════════════════════════════════
 # [B] TigerVNC 독립 서버 — 헤드리스/항상 동작 (포트 5901)
 #
-#  GNOME보다 XFCE가 가상 디스플레이에서 훨씬 안정적
-#  loginctl enable-linger 으로 로그인 없이 부팅 후 자동 시작
+#  - 시스템 서비스(User=REAL_USER)로 실행 — user systemd/machinectl 불필요
+#  - xstartup: dbus-launch로 세션 유지, XFCE exec으로 종료 방지
+#  - 가상 디스플레이이므로 Wayland/X11 세션 상태와 무관하게 동작
 # ════════════════════════════════════════════════════════════
 if [[ "$INSTALL_TIGER" == "true" ]] && command -v vncserver &>/dev/null; then
   section "[B] TigerVNC 독립 서버 (XFCE 헤드리스, 포트 ${TIGER_PORT})"
@@ -381,31 +382,44 @@ if [[ "$INSTALL_TIGER" == "true" ]] && command -v vncserver &>/dev/null; then
   TIGER_DISP="${TIGER_PORT##590}"
   [[ -z "$TIGER_DISP" || "$TIGER_DISP" -le 0 ]] && TIGER_DISP=1
 
-  # xstartup
+  # xstartup — VNC 접속 후 즉시 끊기는 원인:
+  #   1) dbus 없이 XFCE 실행 → 세션 오류로 즉시 종료
+  #   2) exec 없이 실행 → xstartup 반환 시 VNC 세션 종료
+  #   3) XDG_RUNTIME_DIR 없음 → XFCE 내부 오류
   cat > "$VNC_DIR/xstartup" << 'STARTEOF'
-#!/bin/bash
+#!/bin/sh
 unset SESSION_MANAGER
 unset DBUS_SESSION_BUS_ADDRESS
 
-export XDG_RUNTIME_DIR="/run/user/$(id -u)"
-mkdir -p "$XDG_RUNTIME_DIR" && chmod 0700 "$XDG_RUNTIME_DIR"
+# XDG_RUNTIME_DIR 보장
+uid=$(id -u)
+export XDG_RUNTIME_DIR="/run/user/${uid}"
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 0700 "$XDG_RUNTIME_DIR"
 
-[ -x /usr/bin/xsetroot ] && xsetroot -solid grey &
+# 배경색 설정 (오류 무시)
+xsetroot -solid '#2d2d2d' 2>/dev/null || true
 
-# D-Bus 세션
-command -v dbus-launch &>/dev/null && eval "$(dbus-launch --sh-syntax)"
+# D-Bus 세션 시작 — XFCE가 D-Bus 없으면 즉시 종료함
+if command -v dbus-launch >/dev/null 2>&1; then
+  eval "$(dbus-launch --sh-syntax --exit-with-session)"
+fi
 
-# 데스크톱: XFCE → GNOME → xterm 폴백
-if command -v startxfce4 &>/dev/null; then
+# XFCE 시작 (exec: xstartup이 살아있어야 VNC 세션 유지)
+if command -v startxfce4 >/dev/null 2>&1; then
   exec startxfce4
-elif command -v gnome-session &>/dev/null; then
-  export LIBGL_ALWAYS_SOFTWARE=1
-  exec gnome-session
+elif command -v xfce4-session >/dev/null 2>&1; then
+  exec xfce4-session
+elif command -v lxsession >/dev/null 2>&1; then
+  exec lxsession
 else
-  exec xterm -geometry 80x24+0+0 -ls
+  # 최후 폴백: xterm 은 닫아도 VNC 유지되도록 루프
+  xterm -geometry 80x24+0+0 -ls &
+  wait
 fi
 STARTEOF
   chmod +x "$VNC_DIR/xstartup"
+  chown "$REAL_USER:$REAL_USER" "$VNC_DIR/xstartup"
 
   # TigerVNC 설정
   cat > "$VNC_DIR/config" << CFGEOF
@@ -414,61 +428,52 @@ depth=24
 dpi=96
 localhost=no
 CFGEOF
+  chown "$REAL_USER:$REAL_USER" "$VNC_DIR/config"
 
-  chown -R "$REAL_USER:$REAL_USER" "$VNC_DIR"
-
-  # loginctl enable-linger: 로그인 없이도 user 서비스 실행
-  loginctl enable-linger "$REAL_USER" && success "loginctl enable-linger 설정" \
-    || warn "enable-linger 실패 — 로그인 후에만 자동 시작"
-
-  # user systemd 서비스
-  USER_SD_DIR="$REAL_HOME/.config/systemd/user"
-  sudo -u "$REAL_USER" mkdir -p "$USER_SD_DIR"
-
-  # 기존 vncserver 정리
+  # 기존 인스턴스 정리
   sudo -u "$REAL_USER" vncserver -kill ":${TIGER_DISP}" 2>/dev/null || true
-  rm -f "/tmp/.X${TIGER_DISP}-lock" 2>/dev/null || true
+  rm -f "/tmp/.X${TIGER_DISP}-lock" "/tmp/.X11-unix/X${TIGER_DISP}" 2>/dev/null || true
+  sleep 1
 
-  cat > "${USER_SD_DIR}/tigervnc.service" << TSVC
+  # 시스템 서비스로 등록 (user systemd/machinectl 없이도 동작)
+  TIGER_SERVICE="tigervnc-${REAL_USER}"
+  cat > "/etc/systemd/system/${TIGER_SERVICE}.service" << TSVC
 [Unit]
-Description=TigerVNC Standalone VNC Server :${TIGER_DISP} (XFCE headless)
-After=network.target
+Description=TigerVNC Server for ${REAL_USER} (XFCE headless :${TIGER_DISP})
+After=network.target syslog.target
 
 [Service]
 Type=forking
-ExecStart=/usr/bin/vncserver :${TIGER_DISP} -rfbport ${TIGER_PORT} -rfbauth ${PASSWD_FILE} -localhost no
+User=${REAL_USER}
+Group=${REAL_USER}
+WorkingDirectory=${REAL_HOME}
+Environment=HOME=${REAL_HOME}
+Environment=USER=${REAL_USER}
+Environment=SHELL=/bin/bash
+PIDFile=${REAL_HOME}/.vnc/%H:${TIGER_DISP}.pid
+ExecStartPre=/bin/sh -c 'rm -f /tmp/.X${TIGER_DISP}-lock /tmp/.X11-unix/X${TIGER_DISP} 2>/dev/null; true'
+ExecStart=/usr/bin/vncserver :${TIGER_DISP} -rfbport ${TIGER_PORT} -rfbauth ${PASSWD_FILE} -localhost no -fg
 ExecStop=/usr/bin/vncserver -kill :${TIGER_DISP}
 Restart=on-failure
 RestartSec=10
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
 TSVC
 
-  chown -R "$REAL_USER:$REAL_USER" "$REAL_HOME/.config"
-
-  # user 서비스 활성화/시작
-  # machinectl shell 이 sudo 컨텍스트에서 user systemd 접근하는 가장 신뢰성 높은 방법
-  TIGER_STARTED=false
-  if command -v machinectl &>/dev/null; then
-    machinectl shell "${REAL_USER}@.host" /bin/bash -c \
-      "systemctl --user daemon-reload && \
-       systemctl --user enable tigervnc && \
-       systemctl --user restart tigervnc" 2>/dev/null \
-    && TIGER_STARTED=true && success "TigerVNC user 서비스 시작 (machinectl)"
-  fi
-
-  if [[ "$TIGER_STARTED" == "false" ]]; then
-    # 폴백: 직접 vncserver 실행
-    sudo -u "$REAL_USER" bash -c \
-      "XDG_RUNTIME_DIR=/run/user/${REAL_UID} \
-       vncserver :${TIGER_DISP} -rfbport ${TIGER_PORT} -rfbauth ${PASSWD_FILE} -localhost no" \
-      2>/dev/null \
-    && TIGER_STARTED=true && success "TigerVNC 직접 시작 완료 (포트 ${TIGER_PORT})"
-  fi
-
-  [[ "$TIGER_STARTED" == "false" ]] && \
-    warn "TigerVNC 시작 실패 — 수동: sudo -u ${REAL_USER} vncserver :${TIGER_DISP} -rfbport ${TIGER_PORT} -rfbauth ${PASSWD_FILE} -localhost no"
+  systemctl daemon-reload
+  systemctl enable "${TIGER_SERVICE}"
+  systemctl restart "${TIGER_SERVICE}" \
+    && success "TigerVNC 시스템 서비스 시작 완료 (포트 ${TIGER_PORT})" \
+    || {
+      warn "TigerVNC 서비스 시작 실패 — 직접 실행 시도"
+      sudo -u "$REAL_USER" bash -c \
+        "HOME=${REAL_HOME} USER=${REAL_USER} \
+         vncserver :${TIGER_DISP} -rfbport ${TIGER_PORT} \
+         -rfbauth ${PASSWD_FILE} -localhost no" \
+        && success "TigerVNC 직접 시작 완료" \
+        || warn "TigerVNC 시작 실패 — 로그: journalctl -u ${TIGER_SERVICE}"
+    }
 fi
 
 # ════════════════════════════════════════════════════════════
@@ -532,10 +537,10 @@ done <<< "$SERVER_IPS"
 echo ""
 
 echo -e "${BOLD}▶ 서비스 관리:${NC}"
-[[ "$INSTALL_X11VNC" == "true" ]] && echo "  x11vnc:    sudo systemctl status/restart x11vnc-mirror"
+[[ "$INSTALL_X11VNC" == "true" ]] && echo "  x11vnc:      sudo systemctl status/restart x11vnc-mirror"
 [[ "$INSTALL_X11VNC" == "true" ]] && echo "  x11vnc 로그: sudo tail -f /var/log/x11vnc-${REAL_USER}.log"
-[[ "$INSTALL_TIGER"  == "true" ]] && echo "  TigerVNC 시작: sudo -u ${REAL_USER} vncserver :${TIGER_DISP_FINAL} -rfbport ${TIGER_PORT} -rfbauth ${PASSWD_FILE} -localhost no"
-[[ "$INSTALL_TIGER"  == "true" ]] && echo "  TigerVNC 중지: sudo -u ${REAL_USER} vncserver -kill :${TIGER_DISP_FINAL}"
+[[ "$INSTALL_TIGER"  == "true" ]] && echo "  TigerVNC:    sudo systemctl status/restart tigervnc-${REAL_USER}"
+[[ "$INSTALL_TIGER"  == "true" ]] && echo "  TigerVNC 로그: journalctl -u tigervnc-${REAL_USER} -f"
 echo ""
 echo -e "${BOLD}▶ SSH 터널 (보안 접속 권장):${NC}"
 [[ "$INSTALL_X11VNC" == "true" ]] && echo "  ssh -L 5900:localhost:${X11VNC_PORT} ${REAL_USER}@<서버IP>  → VNC: localhost:5900"
