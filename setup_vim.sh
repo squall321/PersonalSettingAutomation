@@ -139,9 +139,18 @@ info "설치된 버전: $VIM_VER"
 # ════════════════════════════════════════════════════════════
 section "[2] Node.js 설치 (coc.nvim 요구사항)"
 
-if ! command -v node &>/dev/null || [[ $(node -e "process.exit(process.version.slice(1).split('.')[0] < 16 ? 1 : 0)" 2>/dev/null; echo $?) -ne 0 ]]; then
+NEED_NODE=false
+if ! command -v node &>/dev/null; then
+  NEED_NODE=true
+else
+  NODE_MAJOR=$(node -e "process.stdout.write(process.version.slice(1).split('.')[0])" 2>/dev/null || echo "0")
+  [[ "$NODE_MAJOR" -lt 16 ]] && NEED_NODE=true
+fi
+
+if [[ "$NEED_NODE" == "true" ]]; then
   info "Node.js 18 LTS 설치 중..."
-  curl -fsSL https://deb.nodesource.com/setup_18.x | bash - 2>/dev/null || \
+  curl -fsSL $CURL_PROXY_OPTS --connect-timeout 30 \
+    https://deb.nodesource.com/setup_18.x | bash - 2>/dev/null || \
     warn "NodeSource 스크립트 실패 — apt nodejs 로 대체 시도"
   apt-get install -y nodejs 2>/dev/null || warn "nodejs 설치 실패 (coc.nvim 비활성화됩니다)"
   success "Node.js $(node --version 2>/dev/null || echo '설치실패') 설치 완료"
@@ -561,14 +570,13 @@ fi
 # fzf 바이너리 설치 (go 빌드 대신 pre-built 바이너리)
 FZF_INSTALL="$PLUG_DIR/fzf/install"
 if [[ -f "$FZF_INSTALL" ]]; then
+  # fzf install 스크립트는 내부적으로 curl/wget 사용 — 환경변수로 전달
   sudo -u "$REAL_USER" HOME="$REAL_HOME" \
+    env HTTP_PROXY="${HTTP_PROXY:-}" HTTPS_PROXY="${HTTPS_PROXY:-}" \
     bash "$FZF_INSTALL" --bin 2>/dev/null \
-    && echo "  [설치] fzf 바이너리" || warn "fzf 바이너리 설치 실패 (수동: ~/.vim/plugged/fzf/install --bin)"
+    && echo "  [설치] fzf 바이너리" \
+    || warn "fzf 바이너리 설치 실패 (수동: ~/.vim/plugged/fzf/install --bin)"
 fi
-
-# vim-plug 상태 파일 생성 (vim이 이미 설치된 것으로 인식하게)
-sudo -u "$REAL_USER" HOME="$REAL_HOME" \
-  vim -u "$VIMRC" -c 'PlugStatus' -c 'sleep 1' -c 'qa!' 2>/dev/null || true
 
 success "플러그인 설치 완료"
 
@@ -610,7 +618,8 @@ sudo -u "$REAL_USER" mkdir -p "$FONT_DIR"
 
 if [[ ! -f "$FONT_DIR/$FONT_NAME" ]]; then
   TMP_DIR=$(mktemp -d)
-  if curl -fL --connect-timeout 15 "$FONT_URL" -o "$TMP_DIR/JetBrainsMono.zip" 2>/dev/null; then
+  if curl -fL $CURL_PROXY_OPTS --connect-timeout 30 --max-time 120 \
+       "$FONT_URL" -o "$TMP_DIR/JetBrainsMono.zip" 2>/dev/null; then
     unzip -q "$TMP_DIR/JetBrainsMono.zip" -d "$TMP_DIR/fonts" 2>/dev/null || true
     find "$TMP_DIR/fonts" -name "*.ttf" ! -name "*Windows*" \
       -exec cp {} "$FONT_DIR/" \; 2>/dev/null || true

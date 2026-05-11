@@ -45,8 +45,8 @@ fi
 
 # 필수 패키지 설치
 echo "[1/4] 필수 패키지 설치 중..."
-apt-get update -y
-apt-get install -y wget gpg apt-transport-https ca-certificates curl
+apt-get $APT_PROXY_OPTS update -y
+apt-get $APT_PROXY_OPTS install -y wget gpg apt-transport-https ca-certificates curl
 
 # Microsoft GPG 키 등록
 echo "[2/4] Microsoft GPG 키 등록 중..."
@@ -82,13 +82,13 @@ fi
 
 # Microsoft 레포지토리 등록
 echo "[3/4] Microsoft APT 레포지토리 등록 중..."
-echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/code stable main" \
+echo "deb [arch=${ARCH} signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/code stable main" \
     | tee /etc/apt/sources.list.d/vscode.list > /dev/null
 
 # VS Code 설치
 echo "[4/4] VS Code 설치 중..."
-apt-get update -y
-apt-get install -y code
+apt-get $APT_PROXY_OPTS update -y
+apt-get $APT_PROXY_OPTS install -y code
 
 echo ""
 echo "=============================="
