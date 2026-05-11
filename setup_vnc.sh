@@ -415,6 +415,7 @@ if [[ "$INSTALL_TIGER" == "true" ]] && command -v vncserver &>/dev/null; then
 geometry=1920x1080
 depth=24
 localhost=no
+rfbport=${TIGER_PORT}
 CFGEOF
   chown "$REAL_USER:$REAL_USER" "$VNC_DIR/config"
 
@@ -448,7 +449,7 @@ Environment=SHELL=/bin/bash
 Environment=XDG_RUNTIME_DIR=/run/user/${REAL_UID}
 ExecStartPre=-/usr/bin/vncserver -kill :${TIGER_DISP}
 ExecStartPre=/bin/bash -c 'rm -f /tmp/.X${TIGER_DISP}-lock /tmp/.X11-unix/X${TIGER_DISP}; mkdir -p /tmp/.X11-unix; chmod 1777 /tmp/.X11-unix'
-ExecStart=/usr/bin/vncserver -fg :${TIGER_DISP} -rfbport ${TIGER_PORT} -rfbauth ${PASSWD_FILE} -geometry 1920x1080 -depth 24 -localhost no
+ExecStart=/usr/bin/vncserver -fg :${TIGER_DISP} -geometry 1920x1080 -depth 24 -localhost no
 ExecStop=/usr/bin/vncserver -kill :${TIGER_DISP}
 Restart=on-failure
 RestartSec=15
