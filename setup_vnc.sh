@@ -143,6 +143,68 @@ fi
 export DEBIAN_FRONTEND=noninteractive
 
 # ════════════════════════════════════════════════════════════
+# [0] 기존 VNC 잔여물 정리 — 반복 실행 안전성 (idempotency)
+#     서비스 정지 → 좀비 프로세스 kill → lock/socket 삭제 → 권한 복구 → 포트 회수
+#     이 단계를 거치면 어떤 더러운 상태에서 시작해도 클린한 셋업 가능
+# ════════════════════════════════════════════════════════════
+section "[0] 기존 VNC 잔여물 정리"
+
+# 0-1. systemd 서비스 정지 (있을 때만)
+for svc in "x11vnc-mirror" "tigervnc-${REAL_USER}"; do
+  if systemctl list-unit-files "${svc}.service" 2>/dev/null | grep -q "$svc"; then
+    if systemctl is-active "$svc" &>/dev/null; then
+      systemctl stop "$svc" 2>/dev/null && info "  서비스 정지: $svc" || true
+    fi
+  fi
+done
+
+# 0-2. 사용자 컨텍스트로 vncserver -kill 정상 종료 시도 (있을 때만)
+if command -v vncserver &>/dev/null; then
+  for d in 1 2 "${TIGER_PORT##590}"; do
+    sudo -u "$REAL_USER" vncserver -kill ":${d}" 2>/dev/null || true
+  done
+fi
+
+# 0-3. 좀비 Xvnc / x11vnc 프로세스 강제 종료 (root 권한)
+if pgrep -f 'Xvnc' &>/dev/null; then
+  pkill -9 -f 'Xvnc' 2>/dev/null && info "  Xvnc 좀비 프로세스 종료" || true
+fi
+if pgrep -x x11vnc &>/dev/null; then
+  pkill -9 -x x11vnc 2>/dev/null && info "  x11vnc 좀비 프로세스 종료" || true
+fi
+
+# 0-4. lock 파일 / X11 소켓 강제 삭제 (root 권한 → /tmp sticky bit 우회)
+for d in 1 2 "${TIGER_PORT##590}"; do
+  for f in "/tmp/.X${d}-lock" "/tmp/.X11-unix/X${d}"; do
+    if [[ -e "$f" ]]; then
+      rm -f "$f" 2>/dev/null && info "  잔여 파일 삭제: $f" || \
+        warn "  삭제 실패 (chattr +i?): $f"
+    fi
+  done
+done
+
+# 0-5. /tmp/.X11-unix 디렉토리 권한 보장 (1777)
+mkdir -p /tmp/.X11-unix 2>/dev/null || true
+if [[ "$(stat -c '%a' /tmp/.X11-unix 2>/dev/null)" != "1777" ]]; then
+  chown root:root /tmp/.X11-unix 2>/dev/null || true
+  chmod 1777 /tmp/.X11-unix 2>/dev/null && info "  /tmp/.X11-unix 권한 → 1777 복구" || \
+    warn "  /tmp/.X11-unix chmod 실패 (lsattr -d 로 immutable 확인)"
+fi
+
+# 0-6. 점유 포트 강제 회수
+for p in "${X11VNC_PORT}" "${TIGER_PORT}"; do
+  if ss -tlnp 2>/dev/null | grep -q ":${p} "; then
+    fuser -k "${p}/tcp" 2>/dev/null && info "  포트 ${p} 회수" || true
+  fi
+done
+
+# 0-7. 잔존 PID 파일 청소
+rm -f "${REAL_HOME}/.vnc/"*.pid 2>/dev/null || true
+
+sleep 1
+success "사전 정리 완료 — 클린한 상태에서 셋업 진행"
+
+# ════════════════════════════════════════════════════════════
 # [1] Wayland 비활성화 — x11vnc는 X11 전용
 #     Ubuntu 22.04+ 기본이 Wayland → x11vnc 연결 불가
 # ════════════════════════════════════════════════════════════
