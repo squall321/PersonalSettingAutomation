@@ -262,18 +262,20 @@ else skip "git"; fi
 # ════════════════════════════════════════════════════════════
 section "[4] npm"
 if target_enabled "npm"; then
-  if command -v npm &>/dev/null; then
-    CERT_LINE=""
-    [[ -n "$INSTALLED_CERT_PATH" ]] && \
-      CERT_LINE="cafile=$SYS_CERT_BUNDLE"
-    write_user_block "$REAL_HOME/.npmrc" \
+  # ~/.npmrc 는 단순 설정 파일 — npm CLI 가 root PATH 에 없어도(NVM 설치 등)
+  # 미리 써두면 npm 설치/실행 시 자동으로 읽힘. command -v 게이트 제거.
+  CERT_LINE=""
+  [[ -n "$INSTALLED_CERT_PATH" ]] && \
+    CERT_LINE="cafile=$SYS_CERT_BUNDLE"
+  write_user_block "$REAL_HOME/.npmrc" \
 "proxy=$HTTP_PROXY
 https-proxy=$HTTPS_PROXY
+noproxy=$NO_PROXY
 ${CERT_LINE}
 strict-ssl=true"
-    success "~/.npmrc 적용"
-  else
-    warn "npm 없음 — 건너뜁니다 (설치 후 재실행하면 적용됩니다)"
+  success "~/.npmrc 적용"
+  if ! command -v npm &>/dev/null && ! sudo -u "$REAL_USER" bash -lc 'command -v npm' &>/dev/null; then
+    info "  (참고) npm 미설치 상태 — 설치 후 즉시 적용됨"
   fi
 else skip "npm"; fi
 
@@ -387,19 +389,16 @@ else skip "gnome"; fi
 # ════════════════════════════════════════════════════════════
 section "[9] wget (~/.wgetrc)"
 if target_enabled "wget"; then
-  if command -v wget &>/dev/null; then
-    CERT_LINE=""
-    [[ -n "$INSTALLED_CERT_PATH" ]] && CERT_LINE="ca_certificate=$SYS_CERT_BUNDLE"
-    write_user_block "$REAL_HOME/.wgetrc" \
+  # ~/.wgetrc 는 단순 설정 파일 — wget CLI 유무 무관
+  CERT_LINE=""
+  [[ -n "$INSTALLED_CERT_PATH" ]] && CERT_LINE="ca_certificate=$SYS_CERT_BUNDLE"
+  write_user_block "$REAL_HOME/.wgetrc" \
 "use_proxy=on
 http_proxy=$HTTP_PROXY
 https_proxy=$HTTPS_PROXY
 no_proxy=$NO_PROXY
 ${CERT_LINE}"
-    success "~/.wgetrc 적용"
-  else
-    warn "wget 없음 — 건너뜁니다 (설치 후 재실행하면 적용됩니다)"
-  fi
+  success "~/.wgetrc 적용"
 else skip "wget"; fi
 
 # ════════════════════════════════════════════════════════════
@@ -407,17 +406,14 @@ else skip "wget"; fi
 # ════════════════════════════════════════════════════════════
 section "[10] curl (~/.curlrc)"
 if target_enabled "curl"; then
-  if command -v curl &>/dev/null; then
-    CERT_LINE=""
-    [[ -n "$INSTALLED_CERT_PATH" ]] && CERT_LINE="cacert = $SYS_CERT_BUNDLE"
-    write_user_block "$REAL_HOME/.curlrc" \
+  # ~/.curlrc 는 단순 설정 파일 — curl CLI 유무 무관
+  CERT_LINE=""
+  [[ -n "$INSTALLED_CERT_PATH" ]] && CERT_LINE="cacert = $SYS_CERT_BUNDLE"
+  write_user_block "$REAL_HOME/.curlrc" \
 "proxy = $HTTP_PROXY
 noproxy = $NO_PROXY
 ${CERT_LINE}"
-    success "~/.curlrc 적용"
-  else
-    warn "curl 없음 — 건너뜁니다 (설치 후 재실행하면 적용됩니다)"
-  fi
+  success "~/.curlrc 적용"
 else skip "curl"; fi
 
 # ════════════════════════════════════════════════════════════
@@ -624,26 +620,17 @@ else skip "yarn"; fi
 # ════════════════════════════════════════════════════════════
 section "[18] pnpm"
 if target_enabled "pnpm"; then
-  if command -v pnpm &>/dev/null; then
-    # pnpm은 npm 설정을 공유하거나 자체 .npmrc 사용
-    CERT_LINE=""
-    [[ -n "$INSTALLED_CERT_PATH" ]] && CERT_LINE="cafile=$SYS_CERT_BUNDLE"
-    write_user_block "$REAL_HOME/.npmrc" \
-"# pnpm proxy (shared with npm)
-proxy=$HTTP_PROXY
-https-proxy=$HTTPS_PROXY
-${CERT_LINE}"
-    success "~/.npmrc (pnpm 공유) 적용"
-    # pnpm 전용 설정 디렉토리
-    PNPM_RC="$REAL_HOME/.pnpmfile.cjs"
-    # pnpm config set 으로도 설정
-    if command -v pnpm &>/dev/null; then
-      sudo -u "$REAL_USER" HOME="$REAL_HOME" pnpm config set proxy "$HTTP_PROXY" 2>/dev/null || true
-      sudo -u "$REAL_USER" HOME="$REAL_HOME" pnpm config set https-proxy "$HTTPS_PROXY" 2>/dev/null || true
-      success "pnpm config set proxy 적용"
-    fi
+  # pnpm 은 ~/.npmrc 를 npm 과 공유 → npm 섹션에서 이미 작성됨 (중복 작성 방지)
+  info "  ~/.npmrc 는 [4] npm 섹션에서 작성됨 (pnpm 도 공유)"
+  # pnpm CLI 가 있으면 자체 config 명령으로도 추가 설정
+  if command -v pnpm &>/dev/null || sudo -u "$REAL_USER" bash -lc 'command -v pnpm' &>/dev/null; then
+    sudo -u "$REAL_USER" HOME="$REAL_HOME" bash -lc "pnpm config set proxy '$HTTP_PROXY'" 2>/dev/null || true
+    sudo -u "$REAL_USER" HOME="$REAL_HOME" bash -lc "pnpm config set https-proxy '$HTTPS_PROXY'" 2>/dev/null || true
+    [[ -n "$INSTALLED_CERT_PATH" ]] && \
+      sudo -u "$REAL_USER" HOME="$REAL_HOME" bash -lc "pnpm config set cafile '$SYS_CERT_BUNDLE'" 2>/dev/null || true
+    success "pnpm config set 적용"
   else
-    warn "pnpm 없음 — 건너뜁니다 (설치 후 재실행하면 적용됩니다)"
+    info "  pnpm CLI 미설치 — ~/.npmrc 만으로도 동작 (설치 후 즉시 적용)"
   fi
 else skip "pnpm"; fi
 
