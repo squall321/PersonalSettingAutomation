@@ -402,12 +402,13 @@ WorkingDirectory=${REAL_HOME}
 # PIDFile: vncserver 가 생성하는 실제 경로 (hostname:display.pid)
 PIDFile=${PID_FILE}
 
-# ── 시작 전 정리 [1]: root 권한으로 /tmp 잠금 파일 삭제 ────────
+# ── 시작 전 정리 [1]: root 권한으로 /tmp 잠금 파일 + 소켓 디렉토리 복구 ──
 # User= 권한(일반유저)으로는 root 소유 /tmp/.X?-lock 삭제 불가
-# → PermissionsStartOnly 없이 root로 실행하려면 별도 ExecStartPre 사용
+# /tmp/.X11-unix 권한 불량 시 "_XSERVTransSocketUNIXCreateListener failed" 발생
 ExecStartPre=/bin/bash -c '\
   rm -f /tmp/.X${VNC_DISPLAY}-lock; \
-  rm -f /tmp/.X11-unix/X${VNC_DISPLAY}'
+  rm -f /tmp/.X11-unix/X${VNC_DISPLAY}; \
+  [ ! -d /tmp/.X11-unix ] && mkdir -m 1777 /tmp/.X11-unix || chmod 1777 /tmp/.X11-unix'
 
 # ── 시작 전 정리 [2]: 사용자 권한으로 기존 vncserver 종료 ──────
 ExecStartPre=/bin/su - ${REAL_USER} -c '\
@@ -455,13 +456,26 @@ if pgrep -u "$REAL_USER" -f "vncserver.*:${VNC_DISPLAY}" &>/dev/null; then
   sleep 1
 fi
 
-# ── STEP B: root 권한으로 stale lock 파일 완전 삭제 ──────────
+# ── STEP B: root 권한으로 stale lock 파일 + 소켓 완전 복구 ──
 # /tmp/.X?-lock 은 root 소유인 경우 있어 반드시 root가 삭제
-info "stale X 잠금 파일 정리 중 (root)..."
-rm -fv /tmp/.X${VNC_DISPLAY}-lock 2>/dev/null || true
-rm -fv /tmp/.X11-unix/X${VNC_DISPLAY} 2>/dev/null || true
-rm -fv "${VNC_PASSWD_DIR}"/*:${VNC_DISPLAY}.pid 2>/dev/null || true
-success "stale 잠금 파일 정리 완료"
+# /tmp/.X11-unix/ 권한이 틀리면 "_XSERVTransSocketUNIXCreateListener failed" 발생
+info "stale X 잠금 파일 + 소켓 디렉토리 복구 중 (root)..."
+rm -f /tmp/.X${VNC_DISPLAY}-lock 2>/dev/null || true
+rm -f /tmp/.X11-unix/X${VNC_DISPLAY} 2>/dev/null || true
+rm -f "${VNC_PASSWD_DIR}"/*:${VNC_DISPLAY}.pid 2>/dev/null || true
+
+# /tmp/.X11-unix 디렉토리 권한 복구 (1777 sticky — 없거나 권한 틀리면 X 소켓 생성 불가)
+if [[ ! -d /tmp/.X11-unix ]]; then
+  mkdir -m 1777 /tmp/.X11-unix
+  info "/tmp/.X11-unix 디렉토리 생성 (1777)"
+else
+  XSOCK_PERM=$(stat -c "%a" /tmp/.X11-unix 2>/dev/null || echo "")
+  if [[ "$XSOCK_PERM" != "1777" ]]; then
+    warn "/tmp/.X11-unix 권한 이상 ($XSOCK_PERM) → 1777 로 수정"
+    chmod 1777 /tmp/.X11-unix
+  fi
+fi
+success "stale 잠금 파일 + 소켓 디렉토리 복구 완료"
 
 # ── STEP C: 일반 사용자로 직접 vncserver 시작 테스트 ────────
 # systemd 서비스 전에 직접 실행해 xstartup/GNOME 오류를 빠르게 감지
