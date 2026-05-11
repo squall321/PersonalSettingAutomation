@@ -402,18 +402,31 @@ if [[ "$INSTALL_TIGER" == "true" ]] && command -v vncserver &>/dev/null; then
   TIGER_DISP="${TIGER_PORT##590}"
   [[ -z "$TIGER_DISP" || "$TIGER_DISP" -le 0 ]] && TIGER_DISP=1
 
-  # ── xstartup 삭제 ─────────────────────────────────────────
-  # xstartup 이 없으면 TigerVNC가 /etc/X11/Xtigervnc-session 을 사용
-  # → /etc/X11/Xsession → GNOME/기본 데스크톱 세션 자동 시작
-  # xstartup 이 있으면 그게 우선 적용돼서 오히려 문제 발생
-  rm -f "$VNC_DIR/xstartup"
-  info "xstartup 제거 — /etc/X11/Xtigervnc-session (시스템 기본 세션) 사용"
+  # ── ~/.vnc/xstartup (XFCE 명시 실행) ─────────────────────
+  # session= 옵션은 TigerVNC 1.11+ 에서만 지원 → 버전 의존성 회피 위해
+  # 명시적 xstartup 사용. 시스템 기본(Xtigervnc-session→GNOME) 폴백 방지.
+  cat > "$VNC_DIR/xstartup" << 'XSEOF'
+#!/bin/sh
+unset SESSION_MANAGER
+unset DBUS_SESSION_BUS_ADDRESS
+[ -r "$HOME/.Xresources" ] && xrdb "$HOME/.Xresources"
+export XDG_SESSION_TYPE=x11
+export XDG_CURRENT_DESKTOP=XFCE
+export XDG_SESSION_DESKTOP=xfce
+# dbus-launch 로 D-Bus 세션 만든 뒤 XFCE 시작 (exec 으로 끝까지 살아있게)
+if command -v dbus-launch >/dev/null 2>&1; then
+  exec dbus-launch --exit-with-session startxfce4
+else
+  exec startxfce4
+fi
+XSEOF
+  chmod 755 "$VNC_DIR/xstartup"
+  chown "$REAL_USER:$REAL_USER" "$VNC_DIR/xstartup"
 
   # ── ~/.vnc/config (vncserver 옵션) ──────────────────────
-  # session=xfce      : Xtigervnc-session이 XFCE로 시작 (GNOME 빠짐 방지)
-  # SecurityTypes     : Ubuntu 22.04+ TLS 기본 회피, VncAuth 폴백 강제
+  # session= 제거 (xstartup 사용)
+  # SecurityTypes=VncAuth : Ubuntu 22.04+ TLS 기본값 우회
   cat > "$VNC_DIR/config" << CFGEOF
-session=xfce
 geometry=1920x1080
 depth=24
 localhost=no
@@ -425,7 +438,9 @@ CFGEOF
   # ── 잔여 인스턴스 정리 ──────────────────────────────────
   sudo -u "$REAL_USER" vncserver -kill ":${TIGER_DISP}" 2>/dev/null || true
   rm -f "/tmp/.X${TIGER_DISP}-lock" "/tmp/.X11-unix/X${TIGER_DISP}" 2>/dev/null || true
-  mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
+  # /tmp/.X11-unix 는 보통 이미 존재 — root여도 immutable/AppArmor로 막힐 수 있어 관대하게
+  mkdir -p /tmp/.X11-unix 2>/dev/null || true
+  chmod 1777 /tmp/.X11-unix 2>/dev/null || true
   sleep 1
 
   TIGER_SERVICE="tigervnc-${REAL_USER}"
