@@ -16,7 +16,7 @@ REAL_USER="${SUDO_USER:-$USER}"
 
 # ── [1] 포트 리스닝 ──────────────────────────────────────────
 sep "포트 리스닝 상태"
-for port in 5900 5901; do
+for port in 5900 5905; do
   if ss -tlnp 2>/dev/null | grep -q ":${port}"; then
     PROC=$(ss -tlnp | grep ":${port}" | grep -oP 'users:\(\("\K[^"]+' || echo "?")
     ok "포트 ${port} LISTEN  ← ${PROC}"
@@ -81,7 +81,7 @@ sep "UFW 방화벽"
 if command -v ufw &>/dev/null; then
   UFW_STATUS=$(ufw status 2>/dev/null)
   if echo "$UFW_STATUS" | grep -q "Status: active"; then
-    for port in 5900 5901; do
+    for port in 5900 5905; do
       if echo "$UFW_STATUS" | grep -q "${port}"; then
         ok "UFW 포트 ${port} 허용됨"
       else
@@ -128,7 +128,7 @@ fi
 # ── 요약 ─────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}━━━  접속 가능 여부 요약  ━━━${NC}"
-for port in 5900 5901; do
+for port in 5900 5905; do
   if ss -tlnp 2>/dev/null | grep -q ":${port}"; then
     SERVER_IP=$(hostname -I | awk '{print $1}')
     ok "접속 가능: ${SERVER_IP}:${port}"

@@ -5,7 +5,7 @@
 #
 #  두 가지 모드 (기본: 둘 다 설치):
 #    [A] x11vnc   — 로그인된 GNOME 세션 미러링 (포트 5900)
-#    [B] TigerVNC — 독립 가상 디스플레이 + XFCE (포트 5901)
+#    [B] TigerVNC — 독립 가상 디스플레이 + XFCE (포트 5905, 디스플레이 :5)
 #                   헤드리스/로그인 전에도 항상 접속 가능
 #
 #  핵심 수정 사항 (v3→v4):
@@ -23,7 +23,7 @@
 #    --x11vnc-only    x11vnc 만 설치 (TigerVNC 건너뜀)
 #    --tiger-only     TigerVNC 만 설치 (x11vnc 건너뜀)
 #    --port-x11 P     x11vnc 포트 (기본: 5900)
-#    --port-tiger P   TigerVNC 포트 (기본: 5901)
+#    --port-tiger P   TigerVNC 포트 (기본: 5905 → 디스플레이 :5)
 #    --no-firewall    UFW 설정 건너뜀
 # ============================================================
 
@@ -52,7 +52,9 @@ info "홈 디렉토리: $REAL_HOME"
 # ── 인수 파싱 ─────────────────────────────────────────────────
 VNC_PASS=""
 X11VNC_PORT=5900
-TIGER_PORT=5901
+# 기본 디스플레이를 :5(포트 5905)로 — 로컬 GUI 세션(보통 :0, :1=Xwayland)과 충돌 회피.
+# 옛 기본(:1)은 데스크톱 세션 살아있는 환경에서 'server already running' 에러 유발.
+TIGER_PORT=5905
 INSTALL_X11VNC=true
 INSTALL_TIGER=true
 SKIP_FIREWALL=false
@@ -453,7 +455,7 @@ SVCEOF
 fi
 
 # ════════════════════════════════════════════════════════════
-# [B] TigerVNC 독립 서버 — 헤드리스/항상 동작 (포트 5901)
+# [B] TigerVNC 독립 서버 — 헤드리스/항상 동작 (기본: 포트 5905 / :5)
 #
 #  - 시스템 서비스(User=REAL_USER)로 실행 — user systemd/machinectl 불필요
 #  - xstartup: dbus-launch로 세션 유지, XFCE exec으로 종료 방지
@@ -464,6 +466,33 @@ if [[ "$INSTALL_TIGER" == "true" ]] && command -v vncserver &>/dev/null; then
 
   TIGER_DISP="${TIGER_PORT##590}"
   [[ -z "$TIGER_DISP" || "$TIGER_DISP" -le 0 ]] && TIGER_DISP=1
+
+  # ── 빈 디스플레이 자동 선택 ──────────────────────────────
+  # /tmp/.X11-unix/X{N} 이 살아있는 X 서버(Xwayland, Xorg 등)에 의해
+  # 점유 중이면 우리가 rm 해도 즉시 다시 만들어짐 → 다음 번호로 우회.
+  # 최대 10번까지 시도 (:1 → :2 → ... → :10).
+  ORIG_DISP="$TIGER_DISP"
+  attempts=0
+  while (( attempts < 10 )); do
+    # 한번 더 청소 시도
+    rm -f "/tmp/.X${TIGER_DISP}-lock" "/tmp/.X11-unix/X${TIGER_DISP}" 2>/dev/null
+    sleep 0.3
+    if [[ ! -e "/tmp/.X${TIGER_DISP}-lock" && ! -e "/tmp/.X11-unix/X${TIGER_DISP}" ]]; then
+      # 비어있음 — 사용 가능
+      break
+    fi
+    # 점유자 확인
+    HOLDER=$(lsof "/tmp/.X11-unix/X${TIGER_DISP}" 2>/dev/null | awk 'NR==2{print $1"(PID "$2")"}')
+    warn "디스플레이 :${TIGER_DISP} 이미 점유 중 (${HOLDER:-unknown}) — 다음 번호 시도"
+    TIGER_DISP=$((TIGER_DISP + 1))
+    TIGER_PORT=$((5900 + TIGER_DISP))
+    attempts=$((attempts + 1))
+  done
+  if [[ "$TIGER_DISP" != "$ORIG_DISP" ]]; then
+    warn "원래 요청 :${ORIG_DISP} → 빈 :${TIGER_DISP} (포트 ${TIGER_PORT}) 로 자동 변경"
+  else
+    info "TigerVNC 디스플레이: :${TIGER_DISP} (포트 ${TIGER_PORT})"
+  fi
 
   # ── ~/.vnc/xstartup (XFCE 명시 실행) ─────────────────────
   # session= 옵션은 TigerVNC 1.11+ 에서만 지원 → 버전 의존성 회피 위해
@@ -622,5 +651,5 @@ echo -e "${BOLD}▶ 서비스 관리:${NC}"
 echo ""
 echo -e "${BOLD}▶ SSH 터널 (보안 접속 권장):${NC}"
 [[ "$INSTALL_X11VNC" == "true" ]] && echo "  ssh -L 5900:localhost:${X11VNC_PORT} ${REAL_USER}@<서버IP>  → VNC: localhost:5900"
-[[ "$INSTALL_TIGER"  == "true" ]] && echo "  ssh -L 5901:localhost:${TIGER_PORT}  ${REAL_USER}@<서버IP>  → VNC: localhost:5901"
+[[ "$INSTALL_TIGER"  == "true" ]] && echo "  ssh -L ${TIGER_PORT}:localhost:${TIGER_PORT} ${REAL_USER}@<서버IP>  → VNC: localhost:${TIGER_PORT}"
 echo ""

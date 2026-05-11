@@ -10,7 +10,7 @@
 #    sudo bash clean_vnc.sh                  # 기본 :1, :2 모두 청소
 #    sudo bash clean_vnc.sh --disp 1         # :1 만
 #    sudo bash clean_vnc.sh --disp 1,2,3     # :1, :2, :3
-#    sudo bash clean_vnc.sh --port 5900,5901 # 특정 포트 강제 회수
+#    sudo bash clean_vnc.sh --port 5900,5905 # 특정 포트 강제 회수
 #    sudo bash clean_vnc.sh --restart        # 청소 후 서비스 자동 재시작
 #    sudo bash clean_vnc.sh --hard           # ~/.vnc/*.log, *.pid 까지 삭제
 # ============================================================
@@ -36,7 +36,7 @@ REAL_USER="${SUDO_USER:-$USER}"
 REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
 
 # ── 인수 파싱 ──────────────────────────────────────────────────
-DISPS="1,2"
+DISPS="1,2,5"
 PORTS=""
 RESTART=false
 HARD=false
@@ -255,5 +255,5 @@ fi
 echo ""
 ok "완료. 다음 단계:"
 $RESTART || echo "  sudo systemctl restart ${TIGERSVC}"
-echo "  ss -tlnp | grep -E '5900|5901'"
+echo "  ss -tlnp | grep -E '5900|5905'"
 echo "  bash check_vnc.sh"
