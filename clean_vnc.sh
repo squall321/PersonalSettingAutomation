@@ -139,6 +139,36 @@ for d in "${DISP_ARR[@]}"; do
   done
 done
 
+# ── [4-2] /tmp/.X11-unix 디렉토리 권한 보장 (1777) ────────────
+# 권한이 잘못되어 있으면 Xvnc 가 자기 소켓을 못 만들어서
+# '_XSERVTransSocketUNIXCreateListener ... failed' 에러로 즉사함.
+# systemd-tmpfiles 가 부팅 시 만들어주지만 어쩌다 권한이 깨져있을 수 있음.
+section "[4-2] /tmp/.X11-unix 디렉토리 권한 확인/복구"
+
+if [[ ! -d /tmp/.X11-unix ]]; then
+  mkdir -p /tmp/.X11-unix && ok "/tmp/.X11-unix 생성"
+fi
+CUR_PERM=$(stat -c '%a' /tmp/.X11-unix 2>/dev/null)
+CUR_OWNER=$(stat -c '%U:%G' /tmp/.X11-unix 2>/dev/null)
+if [[ "$CUR_PERM" != "1777" ]]; then
+  warn "/tmp/.X11-unix 권한이 ${CUR_PERM} (정상: 1777) — 복구 시도"
+  chown root:root /tmp/.X11-unix 2>/dev/null
+  if chmod 1777 /tmp/.X11-unix 2>/dev/null; then
+    ok "/tmp/.X11-unix → 1777 복구"
+  else
+    err "chmod 실패 — chattr +i 가 걸려있을 수 있음:"
+    err "  lsattr -d /tmp/.X11-unix     로 확인 후"
+    err "  sudo chattr -i /tmp/.X11-unix"
+  fi
+  # canonical 한 systemd-tmpfiles 적용 시도
+  if command -v systemd-tmpfiles &>/dev/null; then
+    systemd-tmpfiles --create /usr/lib/tmpfiles.d/x11.conf 2>/dev/null && \
+      info "systemd-tmpfiles 재적용"
+  fi
+else
+  ok "/tmp/.X11-unix 권한 정상 (1777, ${CUR_OWNER})"
+fi
+
 # ── [5] ~/.vnc/*.pid (해당 디스플레이만) ──────────────────────
 section "[5] ~/.vnc/*.pid 정리"
 
