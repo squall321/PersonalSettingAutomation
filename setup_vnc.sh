@@ -159,9 +159,10 @@ for svc in "x11vnc-mirror" "tigervnc-${REAL_USER}"; do
 done
 
 # 0-2. 사용자 컨텍스트로 vncserver -kill 정상 종료 시도 (있을 때만)
+#      "No matching VNC server running" 는 정상 안내 출력 → 통째로 silence
 if command -v vncserver &>/dev/null; then
   for d in 1 2 "${TIGER_PORT##590}"; do
-    sudo -u "$REAL_USER" vncserver -kill ":${d}" 2>/dev/null || true
+    sudo -u "$REAL_USER" vncserver -kill ":${d}" </dev/null >/dev/null 2>&1 || true
   done
 fi
 
