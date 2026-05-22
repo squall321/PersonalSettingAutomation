@@ -230,16 +230,32 @@ if [[ -n "$CURRENT_DRIVER" ]]; then
   if $CHECK_ONLY; then
     exit 0
   fi
-  read -rp "  ▶ 이미 드라이버가 설치돼 있습니다. 재설치/업그레이드? (y/N) " ANS
-  if [[ ! "$ANS" =~ ^[yY]$ ]]; then
-    info "드라이버 단계 건너뜀 — venv 단계로 진행"
+  # phase=post 또는 비대화형 환경(systemd 일회성 서비스) → read 가 hang 됨
+  # 자동으로 'N'(재설치 안 함) 처리하고 venv 단계로 진행
+  if [[ "$PHASE" == "post" ]] || [[ ! -t 0 ]]; then
+    info "드라이버 이미 설치됨 + 비대화형 — 재설치 건너뜀, venv 단계 진행"
     SKIP_DRIVER_INSTALL=true
+  else
+    read -rp "  ▶ 이미 드라이버가 설치돼 있습니다. 재설치/업그레이드? (y/N) " ANS
+    if [[ ! "$ANS" =~ ^[yY]$ ]]; then
+      info "드라이버 단계 건너뜀 — venv 단계로 진행"
+      SKIP_DRIVER_INSTALL=true
+    fi
   fi
 else
   info "NVIDIA 드라이버 미설치"
   if $CHECK_ONLY; then
     warn "드라이버 미설치 상태 — 설치하려면 --check 없이 다시 실행"
     exit 1
+  fi
+  # phase=post 인데 드라이버가 안 보임 → 재부팅이 안 됐거나 MOK 미등록
+  if [[ "$PHASE" == "post" ]]; then
+    error "phase=post 인데 nvidia-smi/드라이버를 찾을 수 없습니다.
+       가능한 원인:
+         1) 재부팅 안 됨 → sudo reboot 후 다시 'sudo bash $0 --phase post ...'
+         2) Secure Boot + MOK 미등록 → 재부팅 시 파란 화면에서 'Enroll MOK' 처리 필요
+         3) 커널 헤더 누락 → sudo apt install linux-headers-\$(uname -r) && sudo dkms autoinstall
+       진단: sudo dmesg | grep -i nvidia | tail -20"
   fi
 fi
 
@@ -339,6 +355,7 @@ fi
 section "[7] 마무리"
 
 # post phase 가 systemd 일회성 서비스로 실행됐다면 자기 자신 정리
+# 로그 파일은 보존 — 사용자가 부팅 후 결과 확인용으로 필요
 SVC_NAME="setup-gpu-post.service"
 SVC_PATH="/etc/systemd/system/${SVC_NAME}"
 if [[ "$PHASE" == "post" && -f "$SVC_PATH" ]]; then
@@ -346,8 +363,7 @@ if [[ "$PHASE" == "post" && -f "$SVC_PATH" ]]; then
   systemctl disable "$SVC_NAME" 2>/dev/null || true
   rm -f "$SVC_PATH"
   systemctl daemon-reload 2>/dev/null || true
-  rm -f /var/log/setup_gpu_resume.log 2>/dev/null || true
-  success "$SVC_NAME 자동 정리 완료"
+  success "$SVC_NAME 자동 정리 완료 (로그는 /var/log/setup_gpu_resume.log 에 보존)"
 fi
 
 if [[ "${NEEDS_REBOOT:-false}" == "true" ]]; then
@@ -355,6 +371,24 @@ if [[ "${NEEDS_REBOOT:-false}" == "true" ]]; then
   echo ""
 
   if $AUTO_RESUME; then
+    # Secure Boot + auto-resume 조합은 위험: MOK 등록 파란 화면에서 사용자 개입 필요
+    case "$SB_STATE" in
+      *"enabled"*)
+        warn "━━━ 중요 ━━━"
+        warn "Secure Boot 가 ENABLED 입니다. --auto-resume 와 함께 쓰면 자동화가 실패할 수 있어요."
+        warn "재부팅 시 'Enroll MOK' 파란 화면이 뜨는데, 자동화는 그 화면을 처리하지 못합니다."
+        warn "권장: --auto-resume 대신 수동 모드로 진행 — 'sudo bash $0 --phase pre'"
+        warn "       그 후 재부팅하며 직접 MOK 등록 → 'sudo bash $0 --phase post --venv ${VENV_PATH:-<venv>}'"
+        warn ""
+        if [[ -t 0 ]]; then
+          read -rp "  ▶ 그래도 auto-resume 로 진행하시겠습니까? (y/N) " AR_GO
+          [[ ! "$AR_GO" =~ ^[yY]$ ]] && { info "취소 — 수동 절차로 진행하세요"; exit 0; }
+        else
+          error "Secure Boot+auto-resume 위험 — 명시적으로 비대화형에서 진행 거부"
+        fi
+        ;;
+    esac
+
     # post phase 자동 실행을 위한 systemd 일회성 서비스 등록
     SCRIPT_PATH="$(readlink -f "$0")"
     # post phase 호출에 venv/cuda-channel/proxy/cert 옵션 승계
@@ -363,9 +397,10 @@ if [[ "${NEEDS_REBOOT:-false}" == "true" ]]; then
     [[ -n "$CUDA_CHANNEL" ]]   && POST_ARGS+=(--cuda-channel "$CUDA_CHANNEL")
     $USE_PROXY || POST_ARGS+=(--no-proxy)
     $USE_CERT  || POST_ARGS+=(--no-cert)
-    # 따옴표로 묶어서 ExecStart 라인 안전하게
+    # systemd 의 ExecStart 는 whitespace-split 으로 인자 파싱하므로 단순 join 으로 충분
+    # (venv 등 경로에 공백 없다는 일반 가정 — 있으면 systemd 'double-quoted' 문법 필요)
     POST_ARGS_STR=""
-    for a in "${POST_ARGS[@]}"; do POST_ARGS_STR+=" $(printf '%q' "$a")"; done
+    for a in "${POST_ARGS[@]}"; do POST_ARGS_STR+=" $a"; done
 
     cat > "$SVC_PATH" << SVCEOF
 [Unit]
@@ -378,7 +413,10 @@ Type=oneshot
 RemainAfterExit=no
 # SUDO_USER 를 명시 — 스크립트가 venv pip install 시 sudo -u 로 활용
 Environment=SUDO_USER=${REAL_USER}
-ExecStart=/bin/bash -c '/bin/bash ${SCRIPT_PATH}${POST_ARGS_STR} > /var/log/setup_gpu_resume.log 2>&1'
+# 직접 인자 전달 (bash -c 의 single-quote 이스케이프 함정 회피)
+ExecStart=/bin/bash ${SCRIPT_PATH}${POST_ARGS_STR}
+StandardOutput=append:/var/log/setup_gpu_resume.log
+StandardError=append:/var/log/setup_gpu_resume.log
 
 [Install]
 WantedBy=multi-user.target
@@ -387,7 +425,7 @@ SVCEOF
     systemctl daemon-reload
     systemctl enable "$SVC_NAME" >/dev/null 2>&1
     success "post phase 자동 실행 서비스 등록: $SVC_NAME"
-    info "  로그: /var/log/setup_gpu_resume.log (재부팅 후 생성됨)"
+    info "  로그: /var/log/setup_gpu_resume.log (재부팅 후 추가됨)"
     info "  10초 후 자동 재부팅 — Ctrl+C 로 취소 가능"
     sleep 10
     reboot
@@ -398,12 +436,17 @@ SVCEOF
     [[ -n "$VENV_PATH" ]] && \
       echo "  sudo bash $0 --phase post --venv ${VENV_PATH}"
     echo ""
-    read -rp "  ▶ 지금 재부팅하시겠습니까? (y/N) " RB
-    if [[ "$RB" =~ ^[yY]$ ]]; then
-      info "10초 후 재부팅..."; sleep 10
-      reboot
+    # 비대화형(예: 다른 스크립트에서 호출) 환경에선 자동 재부팅 안 함 — 안내만
+    if [[ ! -t 0 ]]; then
+      info "비대화형 환경 감지 — 자동 재부팅 안 함. 수동 'sudo reboot' 후 '--phase post' 실행"
     else
-      info "수동 재부팅 후 'sudo bash $0 --phase post --venv ${VENV_PATH:-<venv>}' 실행"
+      read -rp "  ▶ 지금 재부팅하시겠습니까? (y/N) " RB
+      if [[ "$RB" =~ ^[yY]$ ]]; then
+        info "10초 후 재부팅..."; sleep 10
+        reboot
+      else
+        info "수동 재부팅 후 'sudo bash $0 --phase post --venv ${VENV_PATH:-<venv>}' 실행"
+      fi
     fi
   else
     info "(--no-reboot) 수동 재부팅 필요: sudo reboot"
