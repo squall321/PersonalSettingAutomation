@@ -1,0 +1,28 @@
+# ============================================================
+#  vnc_users.yaml  —  setup_vnc_multi.sh 입력 파일
+#
+#  사용:
+#    sudo bash setup_vnc_multi.sh --config vnc_users.yaml
+#
+#  필드:
+#    desktop   : gnome | xfce              (TigerVNC 안에서 띄울 데스크톱)
+#    password  : 공통 비밀번호              (빈 문자열 ""이면 사용자별 대화형 입력)
+#    users     : "<username>: <port>" 매핑
+#                포트는 590N 형태 (5905 → 디스플레이 :5)
+#                같은 포트에 다른 X 서버가 점유 중이면 자동으로 다음 번호로 회피됨
+#
+#  관리:
+#    제거: sudo bash setup_vnc_multi.sh --config vnc_users.yaml --remove
+#    상태: systemctl status tigervnc-<username>
+#    로그: journalctl -u tigervnc-<username> -f
+# ============================================================
+
+desktop: gnome
+
+# 공통 비밀번호 (모든 사용자 동일). 빈 문자열이면 셋업 시 사용자별로 대화형 입력
+password: ""
+
+# username : port  매핑
+users:
+  koopark: 5905
+  nox321:  5904
