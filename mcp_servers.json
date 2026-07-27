@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "hwax": {
+      "type": "http",
+      "url": "http://110.15.177.120:8088/mcp-gw/mcp",
+      "headers": {
+        "Authorization": "Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6ImRldi0xIiwidHlwIjoiSldUIn0.eyJpc3MiOiJodHRwczovL2h3YXguc2VjLnNhbXN1bmcubmV0Iiwic3ViIjoiaHdheC5kZW1vQHNhbXN1bmcuY29tIiwiZW1haWwiOiJod2F4LmRlbW9Ac2Ftc3VuZy5jb20iLCJuYW1lIjoiSFdBWCBEZW1vIFVzZXIiLCJncm91cHMiOlsicG9ydGFsLWFkbWluIl0sImF1ZCI6WyJtY3AtZ2F0ZXdheSJdLCJzY29wZSI6ImFwaSIsInNjb3BlcyI6WyJyZWFkIiwid3JpdGUiXSwicGF0X25hbWUiOiJcdWQxNGNcdWMyYTRcdWQyYjhcdWQxYTBcdWQwNzAiLCJpYXQiOjE3ODUxOTI2MzUsIm5iZiI6MTc4NTE5MjYzNSwiZXhwIjoxNzkyOTY4NjM1LCJqdGkiOiJPVDU1N2xhWW51NGtJb291NHRRdTZXYlhubjNlZjVfaiJ9.YCOesfJ2wDcpAwB7WtkeXzXZ1conLqUWYB2VJqCVj5B52Hw8Fbw3wrRoRODWqjQ0F5QM8StSMWjX-ImeSbf1swANSj3XvVHNqGJg4habiQN5-TMWdva-t0kvE2oXBVrmHQa5FRCDsWGVWzT_BNzSRlDXg2XzrgiefLq2ObpGb-w8pBoA_aGCWRGfou-avXnxfuSx-ZpFlS30qWXvziwmqteMtMmrpm4TidIFwE1rwcfmiyEtRV1K25q64BjMqkuKu0W5gA9aEmOsN1o8q5djNdisqZX6npU7ZlykZ0rvJ4MmTLYfKstjvUvXB5yNF0Kx_a1uUlSWPJYM_3mlqbS68w"
+      }
+    }
+  }
+}
