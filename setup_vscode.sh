@@ -12,9 +12,9 @@ echo "=============================="
 echo " VS Code 설치 자동화 스크립트"
 echo "=============================="
 
-# ── 프록시 설정 로드 (proxy_config.yaml 우선, /etc/environment 폴백) ──
+# ── 프록시 설정 로드 (proxy_config.local.yaml 우선, /etc/environment 폴백) ──
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-YAML_CONFIG="${SCRIPT_DIR}/proxy_config.yaml"
+YAML_CONFIG="${SCRIPT_DIR}/proxy_config.local.yaml"   # 사내 주소가 든 PC 파일(gitignore) — 만드는 법은 proxy_config.yaml 머리
 
 load_proxy_from_yaml() {
   python3 - "$1" << 'PYEOF'
@@ -47,7 +47,7 @@ PYEOF
 }
 
 if [[ -f "$YAML_CONFIG" ]] && command -v python3 &>/dev/null; then
-  echo "[INFO] proxy_config.yaml 에서 프록시 읽는 중: $YAML_CONFIG"
+  echo "[INFO] proxy_config.local.yaml 에서 프록시 읽는 중: $YAML_CONFIG"
   while IFS='=' read -r key val; do
     [[ -z "$key" ]] && continue
     export "$key"="$val"

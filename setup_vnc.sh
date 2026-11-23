@@ -96,7 +96,7 @@ info "Ubuntu 버전: ${UBUNTU_VER}"
 section "프록시 설정 로드"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-YAML_CONFIG="${SCRIPT_DIR}/proxy_config.yaml"
+YAML_CONFIG="${SCRIPT_DIR}/proxy_config.local.yaml"   # 사내 주소가 든 PC 파일(gitignore) — 만드는 법은 proxy_config.yaml 머리
 
 load_proxy_from_yaml() {
   python3 - "$1" << 'PYEOF'

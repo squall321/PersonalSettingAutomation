@@ -9,7 +9,7 @@
 #
 #  옵션:
 #    --version N        Node.js major 버전 (기본: 20)
-#    --no-proxy         proxy_config.yaml 무시 (직결)
+#    --no-proxy         proxy_config.local.yaml 무시 (직결)
 #    --no-cert          사내 CA 인증서 등록 안 함
 #    --check-only       이미 설치돼 있는지 점검만 (설치 안 함)
 #
@@ -74,10 +74,10 @@ elif $CHECK_ONLY; then
 fi
 
 # ════════════════════════════════════════════════════════════
-# 프록시 설정 로드 (proxy_config.yaml)
+# 프록시 설정 로드 (proxy_config.local.yaml)
 # ════════════════════════════════════════════════════════════
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-YAML_CONFIG="${SCRIPT_DIR}/proxy_config.yaml"
+YAML_CONFIG="${SCRIPT_DIR}/proxy_config.local.yaml"   # 사내 주소가 든 PC 파일(gitignore) — 만드는 법은 proxy_config.yaml 머리
 CRT_PATH=""
 APT_PROXY_OPTS=""
 
@@ -134,7 +134,7 @@ PYEOF
       CRT_PATH="${SCRIPT_DIR}/${CRT_PATH#./}"
     fi
   else
-    warn "proxy_config.yaml 없거나 python3 미설치 — 시스템 환경변수 사용"
+    warn "proxy_config.local.yaml 없거나 python3 미설치 — 시스템 환경변수 사용"
   fi
 
   # APT 용 프록시 옵션
