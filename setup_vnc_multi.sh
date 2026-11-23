@@ -196,9 +196,9 @@ fi
 # ════════════════════════════════════════════════════════════
 section "[1] 필수 패키지 설치"
 
-# 프록시 로드 (proxy_config.yaml 가 있으면)
+# 프록시 로드 (proxy_config.local.yaml 가 있으면)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-YAML_CONFIG="${SCRIPT_DIR}/proxy_config.yaml"
+YAML_CONFIG="${SCRIPT_DIR}/proxy_config.local.yaml"   # 사내 주소가 든 PC 파일(gitignore) — 만드는 법은 proxy_config.yaml 머리
 APT_PROXY_OPTS=""
 if [[ -f "$YAML_CONFIG" ]] && command -v python3 &>/dev/null; then
   HP=$(python3 -c "

@@ -36,7 +36,7 @@
 #                     미지정 시 'ubuntu-drivers autoinstall' (권장)
 #    --venv PATH      venv 경로 — pip 으로 CUDA torch 자동 설치
 #    --cuda-channel C cu118 | cu121 | cu124 | cu126  (기본: cu121)
-#    --no-proxy       proxy_config.yaml 무시
+#    --no-proxy       proxy_config.local.yaml 무시
 #    --no-cert        사내 CA 인증서 등록 안 함
 #    --no-reboot      자동 재부팅 안 함 (안내만)
 #    --check          현재 상태 진단만, 설치 변경 없음
@@ -102,7 +102,7 @@ $CHECK_ONLY && info "모드: 진단만 (변경 없음)"
 # 프록시 설정 로드 (setup_chrome.sh/setup_nodejs.sh 와 동일 패턴)
 # ════════════════════════════════════════════════════════════
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-YAML_CONFIG="${SCRIPT_DIR}/proxy_config.yaml"
+YAML_CONFIG="${SCRIPT_DIR}/proxy_config.local.yaml"   # 사내 주소가 든 PC 파일(gitignore) — 만드는 법은 proxy_config.yaml 머리
 CRT_PATH=""
 APT_PROXY_OPTS=""
 
@@ -150,7 +150,7 @@ PYEOF
       CRT_PATH="${SCRIPT_DIR}/${CRT_PATH#./}"
     fi
   else
-    warn "proxy_config.yaml 없거나 python3 미설치 — 시스템 환경변수 사용"
+    warn "proxy_config.local.yaml 없거나 python3 미설치 — 시스템 환경변수 사용"
   fi
 
   if [[ -n "${HTTPS_PROXY:-}" ]]; then

@@ -73,7 +73,7 @@ fi
 section "프록시 설정 로드"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-YAML_CONFIG="${SCRIPT_DIR}/proxy_config.yaml"
+YAML_CONFIG="${SCRIPT_DIR}/proxy_config.local.yaml"   # 사내 주소가 든 PC 파일(gitignore) — 만드는 법은 proxy_config.yaml 머리
 
 load_proxy_from_yaml() {
   python3 - "$1" << 'PYEOF'
@@ -114,7 +114,7 @@ PYEOF
 
 CRT_PATH=""
 if [[ -f "$YAML_CONFIG" ]] && command -v python3 &>/dev/null; then
-  info "proxy_config.yaml 에서 프록시 로드 중"
+  info "proxy_config.local.yaml 에서 프록시 로드 중"
   while IFS='=' read -r key val; do
     [[ -z "$key" ]] && continue
     export "$key"="$val"

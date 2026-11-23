@@ -33,9 +33,9 @@ REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
 
 info "대상 사용자: $REAL_USER ($REAL_HOME)"
 
-# ── 프록시 설정 로드 (proxy_config.yaml 우선, /etc/environment 폴백) ──
+# ── 프록시 설정 로드 (proxy_config.local.yaml 우선, /etc/environment 폴백) ──
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-YAML_CONFIG="${SCRIPT_DIR}/proxy_config.yaml"
+YAML_CONFIG="${SCRIPT_DIR}/proxy_config.local.yaml"   # 사내 주소가 든 PC 파일(gitignore) — 만드는 법은 proxy_config.yaml 머리
 
 load_proxy_from_yaml() {
   local yaml="$1"
@@ -78,7 +78,7 @@ PYEOF
 }
 
 if [[ -f "$YAML_CONFIG" ]] && command -v python3 &>/dev/null; then
-  info "proxy_config.yaml 에서 프록시 설정 읽는 중: $YAML_CONFIG"
+  info "proxy_config.local.yaml 에서 프록시 설정 읽는 중: $YAML_CONFIG"
   while IFS='=' read -r key val; do
     [[ -z "$key" ]] && continue
     export "$key"="$val"
@@ -99,7 +99,7 @@ elif [[ -f /etc/environment ]]; then
   set -u
   [[ -n "${HTTP_PROXY:-}" ]] && info "프록시 감지: $HTTP_PROXY"
 else
-  info "프록시 설정 없음 (proxy_config.yaml / /etc/environment 미존재)"
+  info "프록시 설정 없음 (proxy_config.local.yaml / /etc/environment 미존재)"
 fi
 
 # git / curl 에 넘길 프록시 옵션 사전 구성

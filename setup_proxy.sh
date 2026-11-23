@@ -6,7 +6,7 @@
 #
 #  사용법:
 #    sudo bash setup_proxy.sh [config.yaml]
-#    (기본값: 스크립트와 같은 디렉토리의 proxy_config.yaml)
+#    (기본값: 스크립트와 같은 디렉토리의 proxy_config.local.yaml)
 # ============================================================
 
 set -euo pipefail
@@ -27,9 +27,11 @@ section() { echo -e "\n${BOLD}━━━  $*  ━━━${NC}"; }
 REAL_USER="${SUDO_USER:-$USER}"
 REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="${1:-$SCRIPT_DIR/proxy_config.yaml}"
+CONFIG_FILE="${1:-$SCRIPT_DIR/proxy_config.local.yaml}"
 
-[[ -f "$CONFIG_FILE" ]] || error "설정 파일을 찾을 수 없습니다: $CONFIG_FILE"
+[[ -f "$CONFIG_FILE" ]] || error "설정 파일을 찾을 수 없습니다: $CONFIG_FILE
+        사내 프록시 주소는 공개 리포에 두지 않습니다 — cp proxy_config.yaml proxy_config.local.yaml 후
+        proxy.http / proxy.https 에 이 PC 의 사내 프록시 주소를 적고 다시 실행하세요."
 CONFIG_DIR="$(cd "$(dirname "$CONFIG_FILE")" && pwd)"
 
 info "설정 파일  : $CONFIG_FILE"
